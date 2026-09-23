@@ -31,6 +31,7 @@ WifiPhase wifiPhase = WifiPhase::Idle;
 WifiCandidate wifiCandidates[4]{};
 size_t wifiCandidateCount = 0;
 size_t wifiCandidateIndex = 0;
+uint8_t wifiScanRetries = 0;
 uint32_t wifiPhaseStartedMs = 0;
 String wifiTargetSsid;
 String wifiTargetPassword;
@@ -365,10 +366,16 @@ void completeWifiConnection() {
 
 void connectWifiCredentials(const String& ssid, const String& password) {
   if (ssid.isEmpty()) { Serial.println("[FAIL] Wi-Fi SSID is empty."); return; }
+  // A user-selected network becomes the sole future target immediately. This
+  // prevents an in-flight failure from resurrecting an older saved network.
+  preferences.putString("ssid", ssid);
+  preferences.putString("password", password);
   wifiTargetSsid = ssid;
   wifiTargetPassword = password;
   wifiCandidateCount = 0;
   wifiCandidateIndex = 0;
+  wifiScanRetries = 0;
+  wifiRetryAtMs = 0;
   WiFi.disconnect(false, false);
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(false);
@@ -396,7 +403,18 @@ void tickWifiConnection() {
   if (wifiPhase == WifiPhase::Scanning) {
     const int count = WiFi.scanComplete();
     if (count == WIFI_SCAN_RUNNING) return;
-    if (count < 0) { Serial.printf("[FAIL] Wi-Fi scan error: %d\n", count); scheduleWifiBackoff(); return; }
+    if (count < 0) {
+      if (wifiScanRetries++ == 0) {
+        Serial.printf("[INFO] Wi-Fi scan transient error: %d; retrying scan.\n", count);
+        WiFi.scanDelete();
+        WiFi.scanNetworks(true, true);
+        wifiPhaseStartedMs = millis();
+        return;
+      }
+      Serial.printf("[FAIL] Wi-Fi scan error: %d\n", count);
+      scheduleWifiBackoff();
+      return;
+    }
     for (int i = 0; i < count && wifiCandidateCount < 4; ++i) {
       if (WiFi.SSID(i) != wifiTargetSsid || WiFi.RSSI(i) < -82) continue;
       memcpy(wifiCandidates[wifiCandidateCount].bssid, WiFi.BSSID(i), 6);

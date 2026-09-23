@@ -43,9 +43,18 @@ String wifiTargetPassword;
 uint32_t lastHeartbeatMs = 0;
 uint32_t lastMqttTelemetryMs = 0;
 uint32_t lastStatusLedMs = 0;
+bool statusLedOn = false;
+uint8_t ledPatternEdgesRemaining = 0;
+bool ledPatternOn = false;
+uint16_t ledPatternOnMs = 100;
+uint16_t ledPatternOffMs = 100;
+uint32_t ledPatternNextMs = 0;
 uint32_t telemetryIntervalMs = 100;
 esp_mqtt_client_handle_t mqttClient = nullptr;
 bool mqttOnline = false;
+volatile uint32_t mqttRecoveryAtMs = 0;
+uint32_t lastMqttStartMs = 0;
+volatile bool mqttAnnouncePending = false;
 bool telemetryEnabled = false;
 uint32_t telemetryExpiresAtMs = 0;
 String mqttUri;
@@ -95,7 +104,9 @@ void connectSavedWifi();
 
 String topicFor(const char* suffix) { return "air/v1/" + deviceId() + "/" + suffix; }
 void publishMqtt(const String& topic, const String& payload, int qos = 0, bool retain = false) {
-  if (mqttOnline && mqttClient) esp_mqtt_client_publish(mqttClient, topic.c_str(), payload.c_str(), payload.length(), qos, retain);
+  if (mqttOnline && mqttClient) {
+    esp_mqtt_client_enqueue(mqttClient, topic.c_str(), payload.c_str(), payload.length(), qos, retain, true);
+  }
 }
 void publishAck(const String& requestId, const char* result) {
   publishMqtt(topicFor("ack"), "{\"request_id\":\"" + requestId + "\",\"result\":\"" + result + "\"}", 1);
@@ -114,7 +125,11 @@ void publishHeartbeat() {
 void publishDiagnostic(const String& event) {
   publishMqtt(topicFor("diagnostic"), "{\"uptime_ms\":" + String(millis()) + ",\"event\":\"" + event + "\"}");
 }
-void emitMqttState() { Serial.printf("MQTT_STATE %s\n", mqttOnline ? "online" : "offline"); }
+void emitMqttState() {
+  if (mqttOnline) Serial.println("MQTT_STATE online");
+  else if (preferences.getString("mqtt-uri", "").isEmpty()) Serial.println("MQTT_STATE unconfigured");
+  else Serial.println("MQTT_STATE offline");
+}
 String jsonStringField(const String& json, const char* name) {
   const String key = "\"" + String(name) + "\"";
   const int keyStart = json.indexOf(key);
@@ -159,9 +174,9 @@ void handleMqttCommand(const char* data, int length) {
   else publishAck(requestId, "unsupported");
 }
 esp_err_t mqttEvent(esp_mqtt_event_handle_t event) {
-  if (event->event_id == MQTT_EVENT_CONNECTED) { mqttOnline = true; esp_mqtt_client_subscribe(event->client, mqttCommandTopic.c_str(), 1); publishMqtt(mqttAvailabilityTopic, "online", 1, true); publishState(); Serial.println("MQTT_STATE online"); }
-  else if (event->event_id == MQTT_EVENT_DISCONNECTED) { mqttOnline = false; emitMqttState(); }
-  else if (event->event_id == MQTT_EVENT_ERROR) { mqttOnline = false; Serial.println("MQTT_STATE error"); }
+  if (event->event_id == MQTT_EVENT_CONNECTED) { mqttOnline = true; mqttRecoveryAtMs = 0; mqttAnnouncePending = true; esp_mqtt_client_subscribe(event->client, mqttCommandTopic.c_str(), 1); Serial.println("MQTT_STATE online"); }
+  else if (event->event_id == MQTT_EVENT_DISCONNECTED) { mqttOnline = false; mqttRecoveryAtMs = millis() + 8000; emitMqttState(); }
+  else if (event->event_id == MQTT_EVENT_ERROR) { mqttOnline = false; mqttRecoveryAtMs = millis() + 5000; Serial.println("MQTT_STATE error"); }
   else if (event->event_id == MQTT_EVENT_DATA && event->topic && String(event->topic, event->topic_len) == mqttCommandTopic) handleMqttCommand(event->data, event->data_len);
   return ESP_OK;
 }
@@ -174,7 +189,24 @@ void startMqttIfConfigured() {
   // which returns a temporary String that vanishes at the end of this line.
   mqttClientId = deviceId();
   esp_mqtt_client_config_t config{}; config.uri = mqttUri.c_str(); config.client_id = mqttClientId.c_str(); config.username = mqttUser.c_str(); config.password = mqttPassword.c_str(); config.lwt_topic = mqttAvailabilityTopic.c_str(); config.lwt_msg = "offline"; config.lwt_qos = 1; config.lwt_retain = 1; config.keepalive = 10; config.disable_auto_reconnect = false; config.event_handle = mqttEvent;
-  mqttClient = esp_mqtt_client_init(&config); if (mqttClient) esp_mqtt_client_start(mqttClient);
+  mqttClient = esp_mqtt_client_init(&config);
+  if (mqttClient) {
+    lastMqttStartMs = millis();
+    esp_mqtt_client_start(mqttClient);
+    Serial.println("MQTT_STATE connecting");
+  }
+}
+
+void rebuildMqttClient() {
+  mqttOnline = false;
+  mqttAnnouncePending = false;
+  mqttRecoveryAtMs = 0;
+  if (mqttClient) {
+    esp_mqtt_client_stop(mqttClient);
+    esp_mqtt_client_destroy(mqttClient);
+    mqttClient = nullptr;
+  }
+  startMqttIfConfigured();
 }
 
 void setLed(bool on) {
@@ -183,25 +215,34 @@ void setLed(bool on) {
 }
 
 void blinkLed(uint8_t count, uint16_t onMs = 100, uint16_t offMs = 100) {
-  for (uint8_t i = 0; i < count; ++i) {
-    setLed(true);
-    delay(onMs);
-    setLed(false);
-    delay(offMs);
-  }
+  ledPatternEdgesRemaining = count * 2;
+  ledPatternOn = false;
+  ledPatternOnMs = onMs;
+  ledPatternOffMs = offMs;
+  ledPatternNextMs = millis();
 }
 
 void tickStatusLed() {
-  static bool fastBlinkOn = false;
+  const uint32_t now = millis();
+  if (ledPatternEdgesRemaining) {
+    if (static_cast<int32_t>(now - ledPatternNextMs) >= 0) {
+      ledPatternOn = !ledPatternOn;
+      setLed(ledPatternOn);
+      --ledPatternEdgesRemaining;
+      ledPatternNextMs = now + (ledPatternOn ? ledPatternOnMs : ledPatternOffMs);
+      if (!ledPatternEdgesRemaining) { setLed(false); statusLedOn = false; lastStatusLedMs = now; }
+    }
+    return;
+  }
   const bool connecting = kFixedWifiSsid[0] != '\0';
-  if (!connecting) { if (fastBlinkOn) { fastBlinkOn = false; setLed(false); } return; }
+  if (!connecting) { if (statusLedOn) { statusLedOn = false; setLed(false); } return; }
   // Slow blue blink = scanning / associating. Fast blue blink = Wi-Fi ready.
   // The LED deliberately does not encode purifier mode.
   const uint32_t intervalMs = WiFi.status() == WL_CONNECTED ? 110 : 700;
-  if (millis() - lastStatusLedMs >= intervalMs) {
-    lastStatusLedMs = millis();
-    fastBlinkOn = !fastBlinkOn;
-    setLed(fastBlinkOn);
+  if (now - lastStatusLedMs >= intervalMs) {
+    lastStatusLedMs = now;
+    statusLedOn = !statusLedOn;
+    setLed(statusLedOn);
   }
 }
 
@@ -450,8 +491,9 @@ void completeWifiConnection() {
   wifiPhase = WifiPhase::Online;
   Serial.printf("[PASS] Wi-Fi connected. IP address: %s\n", WiFi.localIP().toString().c_str());
   emitWifiStatus();
-  startMqttIfConfigured();
-  blinkLed(2, 80, 80);
+  // Rebuild MQTT for every newly established network session.  The client
+  // object may survive a Wi-Fi outage while its socket cannot recover.
+  rebuildMqttClient();
 }
 
 void connectWifiCredentials(const String& ssid, const String& password) {
@@ -667,7 +709,6 @@ void setup() {
   }
   printBoardInfo();
   Serial.println("[PASS] Firmware booted and USB serial is responding.");
-  blinkLed(3, 120, 120);
   Serial.printf("[INFO] Fixed Wi-Fi %s will connect automatically in the background.\n", kFixedWifiSsid);
   printHelp();
   Serial.println("Board check ready. Type a command and press Enter.");
@@ -705,6 +746,17 @@ void loop() {
     lastHeartbeatMs = millis();
     publishHeartbeat();
     publishState();
+  }
+  if (mqttOnline && mqttAnnouncePending) {
+    mqttAnnouncePending = false;
+    publishMqtt(mqttAvailabilityTopic, "online", 1, true);
+    publishState();
+    lastHeartbeatMs = millis();
+  }
+  if (!mqttOnline && mqttClient && WiFi.status() == WL_CONNECTED &&
+      millis() - lastMqttStartMs >= 10000) {
+    Serial.println("[INFO] MQTT watchdog rebuilding offline client.");
+    rebuildMqttClient();
   }
   if (telemetryEnabled && mqttOnline && millis() - lastMqttTelemetryMs >= telemetryIntervalMs) {
     lastMqttTelemetryMs = millis();

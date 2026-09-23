@@ -3,6 +3,7 @@ const adcKeys = ['low', 'medium', 'high', 'auto'];
 const ui = { port: null, reader: null, writer: null, connected: false, manualDisconnect: false, partial: '', lines: [], wifiConnectedAt: null, adc: {}, lockId: crypto.randomUUID?.() || String(Date.now()) };
 const lockKey = 'air-control-usb-session';
 window.name = 'air-usb-console';
+if (new URLSearchParams(location.search).has('embedded')) document.body.classList.add('embedded');
 const saved = JSON.parse(localStorage.getItem('purifier-console-device') || '{}');
 adcKeys.forEach(key => { ui.adc[key] = { history: Array(140).fill(0), hasSample: false }; });
 
@@ -35,8 +36,13 @@ async function connectSerial() {
 }
 async function disconnectSerial() {
   ui.manualDisconnect = true;
-  try { if (ui.reader) { await ui.reader.cancel(); ui.reader.releaseLock(); } if (ui.writer) ui.writer.releaseLock(); if (ui.port) await ui.port.close(); } catch (_) {}
-  finally { ui.reader = ui.writer = ui.port = null; releaseLock(); setConnection(false); toast('USB 串口已断开；板卡仍会独立保持 Wi‑Fi。'); }
+  const reader = ui.reader, writer = ui.writer, port = ui.port;
+  ui.connected = false;
+  if (reader) { try { await reader.cancel(); } catch (_) {} try { reader.releaseLock(); } catch (_) {} }
+  if (writer) { try { writer.releaseLock(); } catch (_) {} }
+  if (port) { try { await port.close(); } catch (_) {} }
+  ui.reader = ui.writer = ui.port = null;
+  releaseLock(); setConnection(false); toast('USB 串口已断开；板卡仍会独立保持 Wi‑Fi。');
 }
 async function readSerial() {
   if (!ui.port?.readable || ui.reader) return;
@@ -53,7 +59,7 @@ async function readSerial() {
 function consume(chunk) { const pieces = (ui.partial + chunk).replace(/\r/g, '').split('\n'); ui.partial = pieces.pop(); pieces.filter(Boolean).forEach(parseLine); }
 function parseLine(line) {
   ui.lines.push(line); if (ui.lines.length > 180) ui.lines.shift();
-  parseInfo(ui.lines.join('\n')); parseWifi(line); parseAdc(line); parseOptocoupler(line); parseAdcTest(line);
+  parseInfo(ui.lines.join('\n')); parseWifi(line); parseMqtt(line); parseAdc(line); parseOptocoupler(line); parseAdcTest(line);
 }
 function parseInfo(text) {
   const chip = text.match(/Chip model\s*:\s*([^,\n]+)/), flash = text.match(/Flash\s*:\s*(?:read-error, )?(\d+) bytes/), heap = text.match(/Heap free\/min\s*:\s*(\d+)/), mac = text.match(/MAC address\s*:\s*([0-9A-F:]{17})/i);
@@ -68,6 +74,7 @@ function parseWifi(line) {
   if (association) { setWifiConnecting(association[1], '正在认证…'); return; }
   if (/WIFI_DISCONNECT|association timed out|retry scheduled/.test(line)) { $('wifi-status').textContent = '自动重试等待中'; $('wifi-detail').textContent = '本轮关联未成功；固件将自动退避后重试。'; }
 }
+function parseMqtt(line) { const match = line.match(/^MQTT_STATE\s+(online|offline|error|unconfigured|connecting)$/); if (!match) return; const value = match[1]; $('mqtt-value').textContent = value === 'online' ? '在线 · 正在上报' : value === 'connecting' ? '正在连接…' : value === 'error' ? '连接错误 · 自动恢复中' : value === 'unconfigured' ? '尚未配置' : '离线 · 自动恢复中'; $('mqtt-value').className = value === 'online' ? 'state-good' : value === 'connecting' ? '' : 'state-bad'; }
 function parseAdc(line) { const frame = line.match(/^ADC_FRAME\s+(\d+)\|(\d+)\|(\d+)\|(\d+)$/); if (!frame) return; adcKeys.forEach((key, i) => updateAdc(key, Number(frame[i + 1]))); $('sensors-tag').textContent = '5 ms 采样 · 20 ms 串口帧'; }
 function updateAdc(key, mv) { const sample = ui.adc[key], card = document.querySelector(`[data-adc="${key}"]`); sample.history.push(mv); sample.history.shift(); sample.hasSample = true; card.querySelector('.adc-value strong').textContent = (mv / 1000).toFixed(3); card.querySelector('.lamp').textContent = '原始采样'; drawScope(key); }
 function drawScope(key) { const card = document.querySelector(`[data-adc="${key}"]`), canvas = card?.querySelector('.adc-scope'); if (!canvas) return; const c = canvas.getContext('2d'), { width, height } = canvas, samples = ui.adc[key].history; c.fillStyle = '#050b05'; c.fillRect(0, 0, width, height); c.strokeStyle = '#17451d'; for (let x = 0; x < width; x += 26) { c.beginPath(); c.moveTo(x + .5, 0); c.lineTo(x + .5, height); c.stroke(); } for (let y = 0; y < height; y += 17) { c.beginPath(); c.moveTo(0, y + .5); c.lineTo(width, y + .5); c.stroke(); } c.strokeStyle = '#22ef48'; c.lineWidth = 1.5; c.beginPath(); samples.forEach((mv, i) => { const x = i * width / (samples.length - 1), y = height - 2 - Math.min(height - 4, mv / 3300 * (height - 4)); i ? c.lineTo(x, y) : c.moveTo(x, y); }); c.stroke(); }

@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#000080">
   <title>家庭空气管理</title>
-  <link rel="stylesheet" href="fleet.css">
+  <link rel="stylesheet" href="fleet.css?v=20260924b">
 </head>
 <body>
   <header class="topbar">
     <a class="brand" href="fleet.html"><span class="brand-mark">◌</span><span>家庭空气管理</span></a>
-    <nav class="view-nav" aria-label="视图切换"><a class="active" href="fleet.html">家庭总览</a><a href="index.html" target="air-usb-console">板卡串口调试</a><a href="wifi.html" target="air-wifi-console">板卡 Wi‑Fi 调试</a></nav>
+    <nav class="view-nav" aria-label="视图切换"><a class="active" href="index.html#fleet">家庭总览</a><a href="index.html#serial">板卡串口调试</a><a href="index.html#wifi">板卡 Wi‑Fi 调试</a></nav>
     <div class="top-summary"><span><b id="online-count">0</b> 在线</span><span><b id="pending-count">0</b> 等待响应</span><span class="divider"></span><span class="legend"><i class="low"></i>低速 <i class="medium"></i>中速 <i class="high"></i>高速 <i class="auto"></i>自动 <i class="off"></i>关机 <i class="offline"></i>离线</span></div>
   </header>
 
@@ -44,6 +44,6 @@
   </main>
 
   <div id="context-menu" class="context-menu" hidden><div class="context-title">设备信息</div><label>设备别名<input id="edit-alias"></label><label>净化器编号<input id="edit-id"></label><dl id="device-details"></dl><div class="context-actions"><button id="save-device">保存修改</button><button id="shutdown-device" class="shutdown">关机</button></div><button id="close-context" class="close-context">关闭</button></div>
-  <script src="fleet.js"></script>
+  <script src="fleet.js?v=20260924b"></script>
 </body>
 </html>

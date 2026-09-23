@@ -1,5 +1,6 @@
 const api = 'http://127.0.0.1:8780/api/v1';
 window.name = 'air-wifi-console';
+if (new URLSearchParams(location.search).has('embedded')) document.body.classList.add('embedded');
 const keys = ['low', 'medium', 'high', 'auto'];
 const $ = id => document.getElementById(id);
 const state = { selected: '', histories: Object.fromEntries(keys.map(k => [k, Array(140).fill(0)])), streamHz: 0, telemetryAt: 0 };

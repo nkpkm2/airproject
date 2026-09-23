@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#000080">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1220'/%3E%3Cpath d='M32 10c10 10 18 18 18 29a18 18 0 1 1-36 0c0-11 8-19 18-29Z' fill='%2338d996'/%3E%3Cpath d='M22 40h20M32 21v25' stroke='%230b1220' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E">
+  <title>空气净化器 · 调试台</title>
+  <link rel="stylesheet" href="styles.css?v=20260924b">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">↯</span><span>空气净化器 <b>调试台</b></span></div>
+    <nav class="view-nav" aria-label="视图切换"><a href="index.html#fleet">家庭总览</a><a class="active" href="index.html#serial">板卡串口调试</a><a href="index.html#wifi">板卡 Wi‑Fi 调试</a></nav>
+    <div class="connection"><span id="connection-dot" class="dot offline"></span><span id="connection-text">未连接 USB 串口</span><button id="connect-button" class="primary">连接 USB 串口</button></div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="side-heading"><span>设备清单</span><span class="count">1 / 15</span></div>
+      <button class="device-card selected" aria-label="选择当前测试板"><span class="status-dot"></span><span><b id="side-name">C3-测试板-01</b><small id="side-room">工作台 · 未联网</small></span><span class="chevron">›</span></button>
+      <p class="side-note">当前只接入一块 USB 测试板。后续局域网设备将在这里自动列出。</p>
+      <div class="side-bottom"><span class="dot neutral"></span>本机调试模式</div>
+    </aside>
+
+    <section class="workspace">
+      <div class="title-row"><div><p class="eyebrow">当前设备</p><h1 id="device-title">C3-测试板-01</h1><p id="device-subtitle">ESP32-C3 Super Mini · USB 直连</p></div><div class="actions"><button id="info-button">读取信息</button><button id="blink-button">闪烁 LED</button><button id="reboot-button" class="danger">重启</button></div></div>
+
+      <section class="identity-panel panel">
+        <div class="panel-heading"><h2>设备身份与部署</h2><span class="tag">可编辑</span></div>
+        <div class="field-grid">
+          <label>设备别名<input id="alias-input" value="C3-测试板-01" maxlength="32"></label>
+          <label>净化器编号<input id="purifier-input" value="PUR-001" maxlength="32"></label>
+          <label>所属房间<input id="room-input" value="工作台" maxlength="32"></label>
+          <label>不可变设备 ID<input id="mac-input" value="E8:3D:C1:95:15:34" readonly></label>
+          <label>局域网地址<input id="ip-input" value="未联网" readonly></label>
+          <label>连接方式<input id="transport-input" value="USB Serial / JTAG" readonly></label>
+        </div>
+        <div class="save-row"><span id="save-state">身份资料仅存于此浏览器，尚未写入开发板。</span><button id="save-button">保存资料</button></div>
+      </section>
+
+      <div class="overview-grid">
+        <section class="panel wifi-panel">
+          <div class="panel-heading"><h2>Wi‑Fi 连接</h2><span id="wifi-status" class="tag muted">正在自动连接…</span></div>
+          <div class="wifi-main"><div class="signal-visual" aria-label="Wi-Fi 信号强度"><i></i><i></i><i></i><i></i><i></i></div><div><strong id="wifi-name">固定家庭网络</strong><p id="wifi-detail">固件上电后自动扫描并连接；无需点击或输入密码。</p></div><div class="rssi"><strong id="rssi-value">—</strong><span>dBm</span></div></div>
+          <div class="meter-wrap"><div class="meter-label"><span>信号强度</span><span id="signal-label">无数据</span></div><div class="linear-meter wifi-meter"><span id="wifi-fill"></span></div><div class="meter-scale"><span>-95</span><span>-75</span><span>-55</span><span>-35 dBm</span></div></div>
+          <p class="help">蓝灯慢闪：正在扫描或认证；蓝灯快闪：已连接 Wi‑Fi。SSID 与密码为该私有板卡的固定固件配置。</p>
+        </section>
+        <section class="panel health-panel">
+          <div class="panel-heading"><h2>核心状态</h2><span class="tag good">通过</span></div>
+          <div class="health-rows"><div><span>芯片</span><b id="chip-value">ESP32-C3</b></div><div><span>Flash</span><b id="flash-value">4 MB</b></div><div><span>空闲内存</span><b id="heap-value">—</b></div><div><span>最近复位</span><b id="reset-value">—</b></div><div><span>MQTT 通信</span><b id="mqtt-value">等待板卡状态</b></div></div>
+          <p class="help">数据来自串口 <code>info</code> 日志。Wi‑Fi 成功连接后，RSSI 和 IP 会每 200 ms 从开发板更新。</p>
+        </section>
+      </div>
+
+      <section class="panel sensors-panel">
+        <div class="panel-heading"><div><h2>四路光传感器 / ADC</h2><p>TEMT6000 检测净化器指示灯。开发板以 5 ms 采样；网页每 20 ms 接收一帧并显示右进左移的波形。</p></div><div class="sensor-tools"><span id="sensors-tag" class="tag muted">等待 USB 样本</span><button id="adc-test-button">5 ms 压测</button></div></div>
+        <p id="adc-test-result" class="adc-test-result">串口带宽测试：尚未开始。</p>
+        <div class="adc-grid">
+          <article class="adc-card" data-adc="low"><div class="adc-header"><span>ADC 1 · GPIO4</span><b>低速灯</b></div><div class="adc-value"><strong>—</strong><span>V</span></div><div class="vertical-meter"><canvas class="adc-scope" width="260" height="86" aria-label="低速灯 ADC 波形"></canvas></div><div class="adc-footer"><span>阈值待标定</span><span class="lamp unknown">采样待命</span></div></article>
+          <article class="adc-card" data-adc="medium"><div class="adc-header"><span>ADC 2 · GPIO3</span><b>中速灯</b></div><div class="adc-value"><strong>—</strong><span>V</span></div><div class="vertical-meter"><canvas class="adc-scope" width="260" height="86" aria-label="中速灯 ADC 波形"></canvas></div><div class="adc-footer"><span>阈值待标定</span><span class="lamp unknown">采样待命</span></div></article>
+          <article class="adc-card" data-adc="high"><div class="adc-header"><span>ADC 3 · GPIO1</span><b>高速灯</b></div><div class="adc-value"><strong>—</strong><span>V</span></div><div class="vertical-meter"><canvas class="adc-scope" width="260" height="86" aria-label="高速灯 ADC 波形"></canvas></div><div class="adc-footer"><span>阈值待标定</span><span class="lamp unknown">采样待命</span></div></article>
+          <article class="adc-card" data-adc="auto"><div class="adc-header"><span>ADC 4 · GPIO0</span><b>自动灯</b></div><div class="adc-value"><strong>—</strong><span>V</span></div><div class="vertical-meter"><canvas class="adc-scope" width="260" height="86" aria-label="自动灯 ADC 波形"></canvas></div><div class="adc-footer"><span>阈值待标定</span><span class="lamp unknown">采样待命</span></div></article>
+        </div>
+      </section>
+
+      <section class="panel outputs-panel">
+        <div class="panel-heading"><div><h2>两个光耦输出</h2><p>接入万用表后，先用“导通 / 断开”核对；“300 ms 脉冲”适合模拟一次按键。</p></div><span class="tag muted">默认断开</span></div>
+        <div class="opto-grid">
+          <article data-opto="power"><div class="opto-icon">⏻</div><div><span>光耦 1 · GPIO5</span><b>电源按键</b><small class="opto-status">等待板卡状态</small><div class="opto-actions"><button data-opto-command="opto power on">导通</button><button data-opto-command="opto power off">断开</button><button data-opto-command="opto power pulse">300 ms 脉冲</button></div></div><span class="switch off" aria-label="电源光耦断开"></span></article>
+          <article data-opto="mode"><div class="opto-icon">↻</div><div><span>光耦 2 · GPIO7</span><b>模式切换</b><small class="opto-status">等待板卡状态</small><div class="opto-actions"><button data-opto-command="opto mode on">导通</button><button data-opto-command="opto mode off">断开</button><button data-opto-command="opto mode pulse">300 ms 脉冲</button></div></div><span class="switch off" aria-label="模式光耦断开"></span></article>
+        </div>
+      </section>
+    </section>
+  </main>
+  <div id="toast" role="status"></div>
+  <script src="app.js?v=20260924b"></script>
+</body>
+</html>

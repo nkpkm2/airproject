@@ -5,6 +5,7 @@
 #include <esp_chip_info.h>
 #include <esp_flash.h>
 #include <esp_system.h>
+#include <esp_wifi.h>
 
 #include "board_config.h"
 #include "device_identity.h"
@@ -17,27 +18,31 @@ constexpr uint32_t kWifiStatusIntervalMs = 200;
 constexpr uint32_t kAdcSampleIntervalUs = 5000;
 constexpr uint32_t kAdcFrameIntervalMs = 20;
 constexpr uint32_t kAdcTestDurationMs = 10000;
+// Bench matrix on this assembled purifier controller found that maximum RF
+// power repeatedly reached the AP at -59 dBm but failed authentication. 15 dBm
+// completed association immediately. The lower setting also reduces supply
+// current peaks and sensitivity to a detuned antenna beside the carrier PCB.
+constexpr wifi_power_t kWifiTxPower = WIFI_POWER_15dBm;
+constexpr int8_t kWifiTxPowerDbm = 15;
 String commandBuffer;
 Preferences preferences;
 uint32_t lastWifiStatusMs = 0;
 uint32_t wifiRetryAtMs = 300;
 uint8_t wifiRetryFailures = 0;
 uint32_t wifiAttemptNumber = 0;
-volatile bool wifiDisconnectPending = false;
+volatile uint32_t wifiDisconnectEventsPending = 0;
 volatile uint8_t wifiDisconnectReason = 0;
-bool wifiBssidRecovery = false;
-struct WifiCandidate {
-  uint8_t bssid[6];
-  int32_t rssi;
-  int32_t channel;
-};
-enum class WifiPhase : uint8_t { Idle, Scanning, Roaming, BssidFallback, Backoff, Online };
+volatile bool wifiGotIpPending = false;
+volatile bool wifiAssociatedPending = false;
+portMUX_TYPE wifiEventMux = portMUX_INITIALIZER_UNLOCKED;
+enum class WifiPhase : uint8_t { Idle, Connecting, Backoff, RadioRecovery, Online };
 WifiPhase wifiPhase = WifiPhase::Idle;
-WifiCandidate wifiCandidates[4]{};
-size_t wifiCandidateCount = 0;
-size_t wifiCandidateIndex = 0;
-uint8_t wifiScanRetries = 0;
 uint32_t wifiPhaseStartedMs = 0;
+uint32_t wifiOfflineSinceMs = 0;
+uint32_t wifiIgnoreDisconnectUntilMs = 0;
+uint32_t wifiDisconnectCount = 0;
+uint32_t wifiSuccessfulConnections = 0;
+uint32_t wifiRadioRecoveryCount = 0;
 String wifiTargetSsid;
 String wifiTargetPassword;
 uint32_t lastHeartbeatMs = 0;
@@ -82,18 +87,19 @@ bool optocouplerActive[] = {false, false};
 uint32_t optocouplerPulseOffAtMs[] = {0, 0};
 
 void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
-  if (event != ARDUINO_EVENT_WIFI_STA_DISCONNECTED) return;
-  const auto reason = static_cast<wifi_err_reason_t>(info.wifi_sta_disconnected.reason);
-  wifiDisconnectReason = static_cast<uint8_t>(reason);
-  wifiDisconnectPending = true;
-  Serial.printf("WIFI_DISCONNECT reason=%u|%s\n",
-                static_cast<unsigned>(reason), WiFi.disconnectReasonName(reason));
-  // Reconnect is scheduled from loop(), never from the Wi-Fi event callback.
-  // This keeps the callback fast and prevents overlapping connection attempts.
-  if (wifiPhase == WifiPhase::Online && !preferences.getString("ssid", "").isEmpty()) {
-    wifiPhase = WifiPhase::Backoff;
-    wifiRetryAtMs = millis() + 2000;
+  // Arduino dispatches these callbacks from its Wi-Fi event task. Never call
+  // Serial, Preferences, scan, disconnect or begin here; doing so races the
+  // core's own disconnect handler. Transfer only primitive facts to loop().
+  portENTER_CRITICAL(&wifiEventMux);
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    wifiDisconnectReason = info.wifi_sta_disconnected.reason;
+    ++wifiDisconnectEventsPending;
+  } else if (event == ARDUINO_EVENT_WIFI_STA_CONNECTED) {
+    wifiAssociatedPending = true;
+  } else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+    wifiGotIpPending = true;
   }
+  portEXIT_CRITICAL(&wifiEventMux);
 }
 
 constexpr int kOptocouplerPins[] = {kPowerOptocouplerGpio, kModeOptocouplerGpio};
@@ -103,6 +109,7 @@ void blinkLed(uint8_t count, uint16_t onMs, uint16_t offMs);
 void setOptocoupler(size_t index, bool active);
 void pulseOptocoupler(size_t index);
 void connectSavedWifi();
+const char* wifiPhaseName();
 
 String topicFor(const char* suffix) { return "air/v1/" + deviceId() + "/" + suffix; }
 void publishMqtt(const String& topic, const String& payload, int qos = 0, bool retain = false) {
@@ -115,14 +122,16 @@ void publishAck(const String& requestId, const char* result) {
 }
 void publishState() {
   if (!mqttOnline) return;
-  char body[256];
-  snprintf(body, sizeof(body), "{\"schema\":1,\"device_id\":\"%s\",\"powered\":false,\"mode\":\"unknown\",\"uptime_ms\":%lu,\"adc_mv\":[%lu,%lu,%lu,%lu],\"opto\":{\"power\":%s,\"mode\":%s},\"wifi\":{\"ssid\":\"%s\",\"rssi_dbm\":%d,\"ip\":\"%s\"}}",
-           deviceId().c_str(), static_cast<unsigned long>(millis()), static_cast<unsigned long>(adcMillivolts[0]), static_cast<unsigned long>(adcMillivolts[1]), static_cast<unsigned long>(adcMillivolts[2]), static_cast<unsigned long>(adcMillivolts[3]), optocouplerActive[0] ? "true" : "false", optocouplerActive[1] ? "true" : "false", WiFi.SSID().c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str());
+  char body[448];
+  snprintf(body, sizeof(body), "{\"schema\":1,\"device_id\":\"%s\",\"powered\":false,\"mode\":\"unknown\",\"uptime_ms\":%lu,\"adc_mv\":[%lu,%lu,%lu,%lu],\"opto\":{\"power\":%s,\"mode\":%s},\"wifi\":{\"ssid\":\"%s\",\"rssi_dbm\":%d,\"tx_power_dbm\":%d,\"ip\":\"%s\",\"bssid\":\"%s\",\"channel\":%ld,\"disconnects\":%lu,\"radio_recoveries\":%lu}}",
+           deviceId().c_str(), static_cast<unsigned long>(millis()), static_cast<unsigned long>(adcMillivolts[0]), static_cast<unsigned long>(adcMillivolts[1]), static_cast<unsigned long>(adcMillivolts[2]), static_cast<unsigned long>(adcMillivolts[3]), optocouplerActive[0] ? "true" : "false", optocouplerActive[1] ? "true" : "false", WiFi.SSID().c_str(), WiFi.RSSI(), kWifiTxPowerDbm, WiFi.localIP().toString().c_str(), WiFi.BSSIDstr().c_str(), static_cast<long>(WiFi.channel()), static_cast<unsigned long>(wifiDisconnectCount), static_cast<unsigned long>(wifiRadioRecoveryCount));
   publishMqtt(topicFor("state"), body, 1, true);
 }
 void publishHeartbeat() {
   publishMqtt(topicFor("heartbeat"), "{\"uptime_ms\":" + String(millis()) +
-    ",\"rssi_dbm\":" + String(WiFi.RSSI()) + ",\"ip\":\"" + WiFi.localIP().toString() + "\"}");
+    ",\"rssi_dbm\":" + String(WiFi.RSSI()) + ",\"tx_power_dbm\":" + String(kWifiTxPowerDbm) + ",\"ip\":\"" + WiFi.localIP().toString() +
+    "\",\"wifi_phase\":\"" + wifiPhaseName() + "\",\"disconnects\":" + String(wifiDisconnectCount) +
+    ",\"radio_recoveries\":" + String(wifiRadioRecoveryCount) + "}");
 }
 void publishDiagnostic(const String& event) {
   publishMqtt(topicFor("diagnostic"), "{\"uptime_ms\":" + String(millis()) + ",\"event\":\"" + event + "\"}");
@@ -387,10 +396,9 @@ void emitWifiState() {
 const char* wifiPhaseName() {
   switch (wifiPhase) {
     case WifiPhase::Idle: return "waiting";
-    case WifiPhase::Scanning: return "scanning";
-    case WifiPhase::Roaming: return "associating";
-    case WifiPhase::BssidFallback: return "associating-fallback";
+    case WifiPhase::Connecting: return "associating";
     case WifiPhase::Backoff: return "retry-wait";
+    case WifiPhase::RadioRecovery: return "radio-recovery";
     case WifiPhase::Online: return "online";
   }
   return "unknown";
@@ -450,59 +458,17 @@ void finishAdcTestIfReady() {
   adcTestActive = false;
 }
 
-void scheduleWifiBackoff() {
-  // One fixed household AP: retry predictably.  The previous 6–60 second
-  // exponential wait made a software reset appear stuck after a single miss.
-  WiFi.disconnect(false, false);
-  wifiBssidRecovery = false;
-  wifiRetryFailures = min<uint8_t>(wifiRetryFailures + 1, 3);
-  // 2 s, 4 s, then a 6 s ceiling. This remains polite to the AP while making
-  // recovery from a weak-signal AUTH_EXPIRE visibly faster than the former
-  // 12-second ceiling.
-  const uint32_t retryDelayMs = min<uint32_t>(6000, 1000UL << wifiRetryFailures);
-  wifiRetryAtMs = millis() + retryDelayMs;
-  wifiPhase = WifiPhase::Backoff;
-  Serial.printf("[INFO] Wi-Fi retry %u scheduled in %lu ms.\n",
-                static_cast<unsigned>(wifiRetryFailures), static_cast<unsigned long>(retryDelayMs));
-}
-
-bool startWifiRecoveryScan() {
-  // After AUTH_EXPIRE the C3 Wi-Fi driver can still own an aborted association.
-  // Starting scanNetworks() against that transaction returns WIFI_SCAN_FAILED
-  // (-2).  Rebuild STA first, then launch the asynchronous scan.
-  WiFi.scanDelete();
-  WiFi.disconnect(true, true);
-  delay(100);
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(false);
-  WiFi.persistent(false);
-  WiFi.setSleep(false);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
-  delay(100);
-  return WiFi.scanNetworks(true, true) != WIFI_SCAN_FAILED;
-}
-
-void beginBssidFallback() {
-  if (wifiCandidateIndex >= wifiCandidateCount) { scheduleWifiBackoff(); return; }
-  const WifiCandidate& candidate = wifiCandidates[wifiCandidateIndex];
-  Serial.printf("[TEST] Trying BSSID %02X:%02X:%02X:%02X:%02X:%02X, channel %ld, RSSI %ld dBm.\n",
-                candidate.bssid[0], candidate.bssid[1], candidate.bssid[2], candidate.bssid[3],
-                candidate.bssid[4], candidate.bssid[5], static_cast<long>(candidate.channel),
-                static_cast<long>(candidate.rssi));
-  WiFi.disconnect(false, false);
-  WiFi.begin(wifiTargetSsid.c_str(), wifiTargetPassword.c_str(), candidate.channel, candidate.bssid, true);
-  wifiPhase = WifiPhase::BssidFallback;
-  wifiPhaseStartedMs = millis();
-}
-
 void completeWifiConnection() {
-  preferences.putString("ssid", wifiTargetSsid);
-  preferences.putString("password", wifiTargetPassword);
   wifiRetryFailures = 0;
-  wifiBssidRecovery = false;
   wifiRetryAtMs = 0;
+  wifiOfflineSinceMs = 0;
   wifiPhase = WifiPhase::Online;
-  Serial.printf("[PASS] Wi-Fi connected. IP address: %s\n", WiFi.localIP().toString().c_str());
+  ++wifiSuccessfulConnections;
+  Serial.printf("[PASS] Wi-Fi ready. IP=%s BSSID=%s CH=%ld RSSI=%d dBm successes=%lu disconnects=%lu\n",
+                WiFi.localIP().toString().c_str(), WiFi.BSSIDstr().c_str(),
+                static_cast<long>(WiFi.channel()), WiFi.RSSI(),
+                static_cast<unsigned long>(wifiSuccessfulConnections),
+                static_cast<unsigned long>(wifiDisconnectCount));
   emitWifiStatus();
   // Rebuild MQTT for every newly established network session.  The client
   // object may survive a Wi-Fi outage while its socket cannot recover.
@@ -511,147 +477,136 @@ void completeWifiConnection() {
 
 void connectWifiCredentials(const String& ssid, const String& password) {
   if (ssid.isEmpty()) { Serial.println("[FAIL] Wi-Fi SSID is empty."); return; }
-  // A user-selected network becomes the sole future target immediately. This
-  // prevents an in-flight failure from resurrecting an older saved network.
-  preferences.putString("ssid", ssid);
-  preferences.putString("password", password);
   wifiTargetSsid = ssid;
   wifiTargetPassword = password;
-  wifiCandidateCount = 0;
-  wifiCandidateIndex = 0;
-  wifiScanRetries = 0;
-  wifiBssidRecovery = false;
-  wifiDisconnectPending = false;
   wifiRetryAtMs = 0;
-  // Recreate STA before every association.  This avoids retaining a stale
-  // station transaction across ESP.restart() / USB CDC reset.  Credentials
-  // live in our private configuration and Preferences, not the Wi-Fi driver.
-  WiFi.disconnect(true, true);
-  delay(40);
+  // Configure once before connect. ALL_CHANNEL_SCAN lets the IDF driver see
+  // every AP sharing this SSID and choose the strongest one itself. Do not run
+  // a second application scan while this internal connect scan is active.
   WiFi.mode(WIFI_STA);
-  delay(20);
   WiFi.setAutoReconnect(false);
   WiFi.persistent(false);
   WiFi.setSleep(false);
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);
-  // One fixed household network: begin association directly. Scanning and
-  // BSSID pinning were useful during installation, but can cause a needless
-  // driver race and are not part of normal appliance operation.
+  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+  esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
+  WiFi.setTxPower(kWifiTxPower);
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
   ++wifiAttemptNumber;
-  Serial.printf("[TEST] Starting fixed Wi-Fi association #%lu: %s\n",
-                static_cast<unsigned long>(wifiAttemptNumber), ssid.c_str());
+  Serial.printf("[TEST] Starting driver-managed Wi-Fi association #%lu: %s (TX=%d dBm)\n",
+                static_cast<unsigned long>(wifiAttemptNumber), ssid.c_str(), kWifiTxPowerDbm);
   WiFi.begin(wifiTargetSsid.c_str(), wifiTargetPassword.c_str());
-  wifiPhase = WifiPhase::Roaming;
+  wifiPhase = WifiPhase::Connecting;
   wifiPhaseStartedMs = millis();
-}
-
-void tickWifiConnection() {
-  if ((wifiPhase == WifiPhase::Roaming || wifiPhase == WifiPhase::BssidFallback) &&
-      WiFi.status() == WL_CONNECTED) { completeWifiConnection(); return; }
-
-  // Wi-Fi callbacks are deliberately write-only.  Consume a real disconnect
-  // here, in loop(), so the next operation never overlaps the driver callback.
-  if (wifiDisconnectPending && (wifiPhase == WifiPhase::Roaming || wifiPhase == WifiPhase::BssidFallback)) {
-    const uint8_t reason = wifiDisconnectReason;
-    wifiDisconnectPending = false;
-    if (wifiPhase == WifiPhase::BssidFallback) {
-      ++wifiCandidateIndex;
-      beginBssidFallback();
-      return;
-    }
-    // Authentication expiry is the observed C3/AP failure.  A direct SSID
-    // association can choose a poor AP/BSSID; scan only after such a failure
-    // and retry the visible matching BSSID explicitly.
-    wifiBssidRecovery = true;
-    wifiCandidateCount = 0;
-    wifiCandidateIndex = 0;
-    if (!startWifiRecoveryScan()) {
-      Serial.printf("[INFO] Wi-Fi recovery scan could not start after reason %u.\n", static_cast<unsigned>(reason));
-      scheduleWifiBackoff();
-      return;
-    }
-    Serial.printf("[INFO] Wi-Fi association ended (reason %u); scanning matching APs for BSSID recovery.\n", static_cast<unsigned>(reason));
-    wifiPhase = WifiPhase::Scanning;
-    wifiPhaseStartedMs = millis();
-    return;
-  }
-  if (wifiPhase == WifiPhase::Online && WiFi.status() != WL_CONNECTED) {
-    wifiPhase = WifiPhase::Backoff;
-    wifiRetryAtMs = millis() + 2000;
-    return;
-  }
-  if (wifiPhase == WifiPhase::Backoff && static_cast<int32_t>(millis() - wifiRetryAtMs) >= 0) {
-    connectSavedWifi();
-    return;
-  }
-  if (wifiPhase == WifiPhase::Scanning) {
-    const int count = WiFi.scanComplete();
-    if (count == WIFI_SCAN_RUNNING) return;
-    if (count < 0) {
-      if (wifiScanRetries++ == 0) {
-        Serial.printf("[INFO] Wi-Fi scan transient error: %d; retrying scan.\n", count);
-        if (!startWifiRecoveryScan()) {
-          scheduleWifiBackoff();
-          return;
-        }
-        wifiPhaseStartedMs = millis();
-        return;
-      }
-      Serial.printf("[FAIL] Wi-Fi scan error: %d\n", count);
-      scheduleWifiBackoff();
-      return;
-    }
-    for (int i = 0; i < count && wifiCandidateCount < 4; ++i) {
-      if (WiFi.SSID(i) != wifiTargetSsid || WiFi.RSSI(i) < -82) continue;
-      memcpy(wifiCandidates[wifiCandidateCount].bssid, WiFi.BSSID(i), 6);
-      wifiCandidates[wifiCandidateCount].rssi = WiFi.RSSI(i);
-      wifiCandidates[wifiCandidateCount].channel = WiFi.channel(i);
-      ++wifiCandidateCount;
-    }
-    WiFi.scanDelete();
-    Serial.printf("[INFO] Recovery scan found %u matching AP(s).\n", static_cast<unsigned>(wifiCandidateCount));
-    if (wifiBssidRecovery && wifiCandidateCount > 0) {
-      beginBssidFallback();
-    } else {
-      scheduleWifiBackoff();
-    }
-    return;
-  }
-  if (wifiPhase == WifiPhase::Roaming && millis() - wifiPhaseStartedMs >= 15000) {
-    Serial.println("[INFO] Fixed-network association timed out.");
-    scheduleWifiBackoff();
-    return;
-  }
-  if (wifiPhase == WifiPhase::BssidFallback && millis() - wifiPhaseStartedMs >= 9000) {
-    ++wifiCandidateIndex;
-    beginBssidFallback();
-  }
-}
-
-void connectWifi(const String& encodedCredentials) {
-  const int divider = encodedCredentials.indexOf('|');
-  if (divider < 1) {
-    Serial.println("[FAIL] Wi-Fi credentials format is invalid.");
-    return;
-  }
-  connectWifiCredentials(urlDecode(encodedCredentials.substring(0, divider)),
-                         urlDecode(encodedCredentials.substring(divider + 1)));
+  if (!wifiOfflineSinceMs) wifiOfflineSinceMs = millis();
 }
 
 void connectSavedWifi() {
-  Serial.printf("[INFO] Retrying fixed Wi-Fi network: %s\n", kFixedWifiSsid);
   connectWifiCredentials(kFixedWifiSsid, kFixedWifiPassword);
 }
 
-void forgetWifi() {
-  WiFi.disconnect(true, true);
-  // The production board has one fixed firmware network, so this is only a
-  // temporary disconnect; the reconnect state machine resumes automatically.
-  preferences.remove("bssid");
-  preferences.remove("channel");
-  wifiRetryAtMs = 0;
+void recoverWifiRadio() {
+  ++wifiRadioRecoveryCount;
+  wifiPhase = WifiPhase::RadioRecovery;
+  wifiIgnoreDisconnectUntilMs = millis() + 1500;
+  portENTER_CRITICAL(&wifiEventMux);
+  wifiDisconnectEventsPending = 0;
+  portEXIT_CRITICAL(&wifiEventMux);
+  Serial.printf("[WARN] Restarting Wi-Fi radio after repeated failures; recovery=%lu.\n",
+                static_cast<unsigned long>(wifiRadioRecoveryCount));
+  WiFi.scanDelete();
+  WiFi.setAutoReconnect(false);
+  WiFi.mode(WIFI_OFF);
+  delay(150);
+  WiFi.mode(WIFI_STA);
+  delay(50);
   wifiRetryFailures = 0;
-  Serial.println("[OK] Wi-Fi disconnected; fixed-network retry remains enabled.");
+  connectSavedWifi();
+}
+
+void tickWifiConnection() {
+  const uint32_t now = millis();
+  bool associatedEvent = false;
+  bool gotIpEvent = false;
+  uint32_t pendingDisconnects = 0;
+  uint8_t pendingDisconnectReason = 0;
+  portENTER_CRITICAL(&wifiEventMux);
+  associatedEvent = wifiAssociatedPending;
+  gotIpEvent = wifiGotIpPending;
+  pendingDisconnects = wifiDisconnectEventsPending;
+  pendingDisconnectReason = wifiDisconnectReason;
+  wifiAssociatedPending = false;
+  wifiGotIpPending = false;
+  wifiDisconnectEventsPending = 0;
+  portEXIT_CRITICAL(&wifiEventMux);
+
+  if (associatedEvent) {
+    Serial.printf("[INFO] Wi-Fi link associated; BSSID=%s CH=%ld, waiting for DHCP.\n",
+                  WiFi.BSSIDstr().c_str(), static_cast<long>(WiFi.channel()));
+  }
+  if (gotIpEvent ||
+      (WiFi.status() == WL_CONNECTED && WiFi.localIP()[0] != 0 && wifiPhase != WifiPhase::Online)) {
+    completeWifiConnection();
+    return;
+  }
+
+  const auto reason = static_cast<wifi_err_reason_t>(pendingDisconnectReason);
+  const bool intentionalRadioEvent = reason == WIFI_REASON_ASSOC_LEAVE &&
+    static_cast<int32_t>(now - wifiIgnoreDisconnectUntilMs) < 0;
+  if (pendingDisconnects && !intentionalRadioEvent) {
+    wifiDisconnectCount += pendingDisconnects;
+    wifiRetryFailures = min<uint8_t>(wifiRetryFailures + pendingDisconnects, 8);
+    if (!wifiOfflineSinceMs) wifiOfflineSinceMs = now;
+    mqttOnline = false;
+    Serial.printf("WIFI_DISCONNECT reason=%u|%s count=%lu consecutive=%u\n",
+                  static_cast<unsigned>(reason), WiFi.disconnectReasonName(reason),
+                  static_cast<unsigned long>(wifiDisconnectCount),
+                  static_cast<unsigned>(wifiRetryFailures));
+
+    if (wifiRetryFailures >= 8) {
+      wifiPhase = WifiPhase::RadioRecovery;
+      wifiRetryAtMs = now + 1000;
+      Serial.println("[INFO] Wi-Fi radio recovery scheduled in 1000 ms.");
+    } else {
+      // Arduino-ESP32 performs one compulsory retry after the first failure,
+      // even with auto reconnect disabled. Give that attempt time to finish;
+      // every later retry is owned exclusively by this state machine.
+      const uint32_t retryDelayMs = wifiDisconnectCount == 1
+        ? 8000 : min<uint32_t>(6000, 1000UL << min<uint8_t>(wifiRetryFailures, 3));
+      wifiRetryAtMs = now + retryDelayMs;
+      wifiPhase = WifiPhase::Backoff;
+      Serial.printf("[INFO] Driver-managed retry scheduled in %lu ms.\n",
+                    static_cast<unsigned long>(retryDelayMs));
+    }
+  }
+
+  if (wifiPhase == WifiPhase::Online && WiFi.status() != WL_CONNECTED) {
+    if (!wifiOfflineSinceMs) wifiOfflineSinceMs = now;
+    wifiPhase = WifiPhase::Backoff;
+    wifiRetryAtMs = now + 2000;
+  }
+  if (wifiPhase == WifiPhase::Backoff && static_cast<int32_t>(now - wifiRetryAtMs) >= 0) {
+    connectSavedWifi();
+    return;
+  }
+  if (wifiPhase == WifiPhase::RadioRecovery && static_cast<int32_t>(now - wifiRetryAtMs) >= 0) {
+    recoverWifiRadio();
+    return;
+  }
+  // A lost driver event must not leave an unattended appliance stuck forever.
+  if (wifiPhase == WifiPhase::Connecting && now - wifiPhaseStartedMs >= 20000) {
+    Serial.println("[WARN] Wi-Fi connect watchdog expired without a terminal event.");
+    recoverWifiRadio();
+  }
+}
+
+void forgetWifi() {
+  wifiIgnoreDisconnectUntilMs = millis() + 1500;
+  WiFi.disconnect(false, false);
+  wifiPhase = WifiPhase::Backoff;
+  wifiRetryFailures = 0;
+  wifiRetryAtMs = millis() + 2000;
+  Serial.println("[OK] Wi-Fi disconnected; fixed-network reconnect scheduled.");
 }
 
 void printHelp() {

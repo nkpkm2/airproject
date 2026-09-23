@@ -21,7 +21,7 @@
 - Wi-Fi 只能由一个连接调度器控制；禁止 SDK 自动重连、后台重连和手动连接同时争用射频。
 - 本项目部署为单一家庭 Wi-Fi：凭据编译自被 Git 忽略的 `include/private_config.h`，不进入可提交源码；浏览器不负责配网。
 
-详见 [系统架构](docs/architecture.md) 与 [MQTT 契约](docs/mqtt-contract.md)。
+详见 [系统架构](docs/architecture.md)、[MQTT 契约](docs/mqtt-contract.md) 与 [Wi-Fi 可靠性分析](docs/wifi-reliability-analysis.md)。
 
 ## 当前开发阶段
 

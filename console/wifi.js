@@ -68,6 +68,8 @@ function showDevice(d) {
   $('availability').textContent = degraded ? '通信抖动' : online ? '在线' : '离线'; $('availability').className = `tag ${online && !degraded ? 'good' : 'muted'}`;
   $('connection-dot').className = `dot ${connection}`; $('connection-text').textContent = degraded ? '心跳延迟，暂不判离线' : online ? '设备已通过 MQTT 在线' : '设备离线 / 等待心跳';
   $('ip').value = wifi.ip || heartbeat.ip || '未联网'; const ssid = wifi.ssid; $('ssid').value = ssid || (online ? '已连接（SSID 未上报）' : '未上报');
+  $('access-point').value = wifi.bssid ? `${wifi.bssid} / CH ${wifi.channel ?? '—'}` : '—';
+  $('wifi-counters').value = `${heartbeat.disconnects ?? wifi.disconnects ?? 0} / ${heartbeat.radio_recoveries ?? wifi.radio_recoveries ?? 0}`;
   const rssi = heartbeat.rssi_dbm ?? wifi.rssi_dbm; setSignal(rssi); $('wifi-name').textContent = ssid || (online ? '局域网已连接' : '等待 Wi-Fi 连接');
   $('wifi-status').textContent = degraded ? '心跳延迟 · 保持在线' : online ? '在线 · DHCP 地址有效' : '离线';
   $('wifi-detail').textContent = online ? `IP ${wifi.ip || heartbeat.ip || '—'} · 心跳 ${duration(d.heartbeat_age_ms || 0)}前` : '板卡上电后会自动尝试保存的 Wi-Fi';

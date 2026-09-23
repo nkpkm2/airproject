@@ -184,13 +184,12 @@ void blinkLed(uint8_t count, uint16_t onMs = 100, uint16_t offMs = 100) {
 
 void tickStatusLed() {
   static bool fastBlinkOn = false;
-  if (WiFi.status() != WL_CONNECTED) {
-    if (fastBlinkOn) { fastBlinkOn = false; setLed(false); }
-    return;
-  }
-  // A rapid blue blink means the board has Wi-Fi and is reachable by the
-  // local control system. It deliberately does not encode purifier mode.
-  if (millis() - lastStatusLedMs >= 110) {
+  const bool connecting = !preferences.getString("ssid", "").isEmpty();
+  if (!connecting) { if (fastBlinkOn) { fastBlinkOn = false; setLed(false); } return; }
+  // Slow blue blink = scanning / associating. Fast blue blink = Wi-Fi ready.
+  // The LED deliberately does not encode purifier mode.
+  const uint32_t intervalMs = WiFi.status() == WL_CONNECTED ? 110 : 700;
+  if (millis() - lastStatusLedMs >= intervalMs) {
     lastStatusLedMs = millis();
     fastBlinkOn = !fastBlinkOn;
     setLed(fastBlinkOn);

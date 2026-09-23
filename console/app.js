@@ -1,51 +1,80 @@
-const $ = (id) => document.getElementById(id);
+const $ = id => document.getElementById(id);
 const adcKeys = ['low', 'medium', 'high', 'auto'];
-const ui = { reader: null, writer: null, port: null, connected: false, lines: [], partial: '', adc: {}, wifiConnectedAt: null, wifiConnecting: false };
+const ui = { port: null, reader: null, writer: null, connected: false, manualDisconnect: false, partial: '', lines: [], wifiConnectedAt: null, adc: {}, lockId: crypto.randomUUID?.() || String(Date.now()) };
+const lockKey = 'air-control-usb-session';
 const saved = JSON.parse(localStorage.getItem('purifier-console-device') || '{}');
+adcKeys.forEach(key => { ui.adc[key] = { history: Array(140).fill(0), hasSample: false }; });
 
-adcKeys.forEach((key) => { ui.adc[key] = { history: Array(140).fill(0), hasSample: false }; });
-['alias', 'purifier', 'room'].forEach((key) => { if (saved[key]) $(`${key}-input`).value = saved[key]; });
-refreshIdentity();
-setSerialControls(false);
+function toast(message) { const node = $('toast'); node.textContent = message; node.classList.add('show'); clearTimeout(toast.timer); toast.timer = setTimeout(() => node.classList.remove('show'), 3200); }
+function lockRecord() { try { return JSON.parse(localStorage.getItem(lockKey) || 'null'); } catch (_) { return null; } }
+function lockHeldElsewhere() { const lock = lockRecord(); return lock && lock.id !== ui.lockId && Date.now() - lock.at < 8000; }
+function claimLock() { if (lockHeldElsewhere()) return false; localStorage.setItem(lockKey, JSON.stringify({ id: ui.lockId, at: Date.now() })); return true; }
+function refreshLock() { if (ui.connected) localStorage.setItem(lockKey, JSON.stringify({ id: ui.lockId, at: Date.now() })); }
+function releaseLock() { const lock = lockRecord(); if (lock?.id === ui.lockId) localStorage.removeItem(lockKey); }
+setInterval(refreshLock, 2000);
+window.addEventListener('beforeunload', releaseLock);
+window.addEventListener('storage', event => { if (event.key === lockKey && !ui.connected && lockHeldElsewhere()) $('connect-button').textContent = '串口已被另一调试台占用'; });
 
-function toast(message) { const node = $('toast'); node.textContent = message; node.classList.add('visible'); clearTimeout(toast.timer); toast.timer = setTimeout(() => node.classList.remove('visible'), 3200); }
-function refreshIdentity() { const alias = $('alias-input').value || '未命名设备'; $('device-title').textContent = alias; $('side-name').textContent = alias; $('side-room').textContent = `${$('room-input').value || '未分配房间'} · ${ui.connected ? 'USB 已连接' : '未联网'}`; }
-function setSerialControls(connected) { document.querySelectorAll('#info-button,#blink-button,#reboot-button,#adc-test-button,[data-opto-command],#save-button').forEach(button => { button.disabled = !connected; }); }
-function setConnection(connected) { ui.connected = connected; $('connection-dot').className = `dot ${connected ? 'neutral' : 'offline'}`; $('connection-text').textContent = connected ? 'USB 串口已连接' : '未连接 USB 串口'; $('connect-button').textContent = connected ? '断开串口' : '连接 USB 串口'; setSerialControls(connected); refreshIdentity(); }
-function send(command) { if (!ui.writer) { toast('请先连接 USB 串口'); return false; } ui.writer.write(new TextEncoder().encode(`${command}\n`)); return true; }
-function formatDuration(seconds) { if (seconds < 60) return `${seconds} 秒`; const minutes = Math.floor(seconds / 60), remainder = seconds % 60; return remainder ? `${minutes} 分 ${remainder} 秒` : `${minutes} 分`; }
-function refreshWifiDuration() { if (ui.wifiConnectedAt === null) return; $('wifi-status').textContent = `已连接 ${formatDuration(Math.floor((Date.now() - ui.wifiConnectedAt) / 1000))}`; }
-function setWifiConnecting(ssid) { ui.wifiConnectedAt = null; ui.wifiConnecting = true; $('wifi-status').textContent = '正在连接…'; $('wifi-detail').textContent = `正在扫描并逐个尝试 ${ssid} 的接入点；最多约 25 秒`; }
-function setWifiDisconnected(detail = '开发板当前未连接 Wi‑Fi') { ui.wifiConnectedAt = null; ui.wifiConnecting = false; $('wifi-status').textContent = '已断开'; $('wifi-detail').textContent = detail; $('ip-input').value = '未连接'; }
-setInterval(refreshWifiDuration, 1000);
+function setSerialControls(enabled) { document.querySelectorAll('#info-button,#blink-button,#reboot-button,#adc-test-button,[data-opto-command],#save-button').forEach(button => { button.disabled = !enabled; }); }
+function formatDuration(seconds) { if (seconds < 60) return `${seconds} 秒`; return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`; }
+function refreshIdentity() { const alias = $('alias-input').value || '未命名设备'; $('device-title').textContent = alias; $('side-name').textContent = alias; $('side-room').textContent = `${$('room-input').value || '未分配房间'} · ${ui.connected ? 'USB 已连接' : 'USB 未连接'}`; }
+function setUsbDisconnected(detail = 'USB 串口已断开；页面数据不再刷新。') { ui.wifiConnectedAt = null; $('wifi-status').textContent = 'USB 已断开'; $('wifi-detail').textContent = detail; $('ip-input').value = '无实时 USB 数据'; $('rssi-value').textContent = '—'; }
+function setConnection(connected) { ui.connected = connected; $('connection-dot').className = `dot ${connected ? 'neutral' : 'offline'}`; $('connection-text').textContent = connected ? 'USB 串口已连接' : '未连接 USB 串口'; $('connect-button').textContent = connected ? '断开串口' : lockHeldElsewhere() ? '串口已被另一调试台占用' : '连接 USB 串口'; setSerialControls(connected); if (!connected) setUsbDisconnected(); refreshIdentity(); }
+function setWifiConnecting(ssid, phase = '正在自动连接') { ui.wifiConnectedAt = null; $('wifi-status').textContent = phase; $('wifi-name').textContent = ssid; $('wifi-detail').textContent = '固定网络由固件自动扫描、认证和重试；无需手动操作。'; }
+function setSignal(rssi) { const pct = Math.max(4, Math.min(100, ((rssi + 95) / 60) * 100)); $('wifi-fill').style.width = `${pct}%`; $('signal-label').textContent = rssi >= -55 ? '强' : rssi >= -70 ? '良好' : rssi >= -82 ? '一般' : '弱'; }
+function send(command) { if (!ui.writer) { toast('USB 串口未连接；操作已禁用'); return false; } ui.writer.write(new TextEncoder().encode(`${command}\n`)).catch(() => toast('串口写入失败')); return true; }
 
-$('save-button').addEventListener('click', () => { const data = { alias: $('alias-input').value.trim(), purifier: $('purifier-input').value.trim(), room: $('room-input').value.trim() }; localStorage.setItem('purifier-console-device', JSON.stringify(data)); refreshIdentity(); $('save-state').textContent = '已保存到本浏览器；联网协议接入后可同步到设备。'; toast('设备资料已保存'); });
-['alias-input', 'room-input'].forEach((id) => $(id).addEventListener('input', refreshIdentity));
-$('info-button').onclick = () => send('info');
-$('blink-button').onclick = () => send('blink');
-$('reboot-button').onclick = () => { if (confirm('确认重启当前 ESP32-C3？')) send('reboot'); };
-$('adc-test-button').onclick = () => { if (send('adc test')) { $('adc-test-result').textContent = '正在进行 10 秒测试：5 ms 采样、20 ms 串口帧…'; } };
-document.querySelectorAll('[data-opto-command]').forEach((button) => { button.onclick = () => send(button.dataset.optoCommand); });
-$('connect-button').onclick = connectSerial;
+async function connectSerial() {
+  if (ui.connected) return disconnectSerial();
+  if (!('serial' in navigator)) return toast('此浏览器不支持 Web Serial；请使用 Chrome 或 Edge。');
+  if (!claimLock()) return toast('COM6 已被另一个串口调试页占用；请先在那个页面断开。');
+  try {
+    ui.port = await navigator.serial.requestPort(); await ui.port.open({ baudRate: 115200 }); ui.writer = ui.port.writable.getWriter(); ui.manualDisconnect = false; ui.partial = ''; ui.lines = []; setConnection(true); toast('USB 已连接，正在读取板卡真实联网状态…'); readSerial(); send('info');
+  } catch (error) { releaseLock(); ui.port = null; setConnection(false); toast(`无法连接串口：${error.message}`); }
+}
+async function disconnectSerial() {
+  ui.manualDisconnect = true;
+  try { if (ui.reader) { await ui.reader.cancel(); ui.reader.releaseLock(); } if (ui.writer) ui.writer.releaseLock(); if (ui.port) await ui.port.close(); } catch (_) {}
+  finally { ui.reader = ui.writer = ui.port = null; releaseLock(); setConnection(false); toast('USB 串口已断开；板卡仍会独立保持 Wi‑Fi。'); }
+}
+async function readSerial() {
+  if (!ui.port?.readable || ui.reader) return;
+  const decoder = new TextDecoder();
+  try {
+    ui.reader = ui.port.readable.getReader();
+    while (ui.connected && ui.port.readable) { const { value, done } = await ui.reader.read(); if (done) break; if (value) consume(decoder.decode(value, { stream: true })); }
+  } catch (error) { if (ui.connected && !ui.manualDisconnect) toast(`串口读取暂时中断：${error.message}`); }
+  finally {
+    if (ui.reader) { try { ui.reader.releaseLock(); } catch (_) {} ui.reader = null; }
+    if (ui.connected && !ui.manualDisconnect) setTimeout(readSerial, 700);
+  }
+}
+function consume(chunk) { const pieces = (ui.partial + chunk).replace(/\r/g, '').split('\n'); ui.partial = pieces.pop(); pieces.filter(Boolean).forEach(parseLine); }
+function parseLine(line) {
+  ui.lines.push(line); if (ui.lines.length > 180) ui.lines.shift();
+  parseInfo(ui.lines.join('\n')); parseWifi(line); parseAdc(line); parseOptocoupler(line); parseAdcTest(line);
+}
+function parseInfo(text) {
+  const chip = text.match(/Chip model\s*:\s*([^,\n]+)/), flash = text.match(/Flash\s*:\s*(?:read-error, )?(\d+) bytes/), heap = text.match(/Heap free\/min\s*:\s*(\d+)/), mac = text.match(/MAC address\s*:\s*([0-9A-F:]{17})/i);
+  if (chip) $('chip-value').textContent = chip[1].trim(); if (flash) $('flash-value').textContent = `${(Number(flash[1]) / 1048576).toFixed(0)} MB`; if (heap) $('heap-value').textContent = `${Math.round(Number(heap[1]) / 1024)} KB`; if (mac) $('mac-input').value = mac[1].toUpperCase();
+}
+function parseWifi(line) {
+  const status = line.match(/^WIFI_STATUS\s+([^|]+)\|([^|]+)\|(-?\d+)/);
+  if (status) { const [, ssid, ip, raw] = status, rssi = Number(raw); if (ui.wifiConnectedAt === null) ui.wifiConnectedAt = Date.now(); $('wifi-status').textContent = `已连接 ${formatDuration(Math.floor((Date.now() - ui.wifiConnectedAt) / 1000))}`; $('wifi-name').textContent = ssid; $('wifi-detail').textContent = `IP ${ip} · 信号每 200 ms 更新`; $('ip-input').value = ip; $('rssi-value').textContent = rssi; setSignal(rssi); return; }
+  const progress = line.match(/^WIFI_PROGRESS\s+([^|]+)\|(.+)$/);
+  if (progress) { const [, phase, ssid] = progress; if (phase === 'online') return; setWifiConnecting(ssid, phase === 'retry-wait' ? '自动重试等待中' : phase === 'associating' ? '正在认证…' : '正在自动连接…'); return; }
+  if (/^\[TEST\] Starting fixed Wi-Fi association:/.test(line)) { setWifiConnecting(line.split(':').pop().trim(), '正在认证…'); return; }
+  if (/WIFI_DISCONNECT|association timed out|retry scheduled/.test(line)) { $('wifi-status').textContent = '自动重试等待中'; $('wifi-detail').textContent = '本轮关联未成功；固件将自动退避后重试。'; }
+}
+function parseAdc(line) { const frame = line.match(/^ADC_FRAME\s+(\d+)\|(\d+)\|(\d+)\|(\d+)$/); if (!frame) return; adcKeys.forEach((key, i) => updateAdc(key, Number(frame[i + 1]))); $('sensors-tag').textContent = '5 ms 采样 · 20 ms 串口帧'; }
+function updateAdc(key, mv) { const sample = ui.adc[key], card = document.querySelector(`[data-adc="${key}"]`); sample.history.push(mv); sample.history.shift(); sample.hasSample = true; card.querySelector('.adc-value strong').textContent = (mv / 1000).toFixed(3); card.querySelector('.lamp').textContent = '原始采样'; drawScope(key); }
+function drawScope(key) { const card = document.querySelector(`[data-adc="${key}"]`), canvas = card?.querySelector('.adc-scope'); if (!canvas) return; const c = canvas.getContext('2d'), { width, height } = canvas, samples = ui.adc[key].history; c.fillStyle = '#050b05'; c.fillRect(0, 0, width, height); c.strokeStyle = '#17451d'; for (let x = 0; x < width; x += 26) { c.beginPath(); c.moveTo(x + .5, 0); c.lineTo(x + .5, height); c.stroke(); } for (let y = 0; y < height; y += 17) { c.beginPath(); c.moveTo(0, y + .5); c.lineTo(width, y + .5); c.stroke(); } c.strokeStyle = '#22ef48'; c.lineWidth = 1.5; c.beginPath(); samples.forEach((mv, i) => { const x = i * width / (samples.length - 1), y = height - 2 - Math.min(height - 4, mv / 3300 * (height - 4)); i ? c.lineTo(x, y) : c.moveTo(x, y); }); c.stroke(); }
+function parseOptocoupler(line) { const m = line.match(/^OPTO_STATUS\s+(power|mode)\|(\d+)\|(0|1)$/); if (!m) return; const [, key, gpio, raw] = m, on = raw === '1', article = document.querySelector(`[data-opto="${key}"]`); article.querySelector('.opto-status').textContent = `GPIO${gpio} · ${on ? '已导通' : '已断开'}`; article.querySelector('.switch').className = `switch ${on ? 'on' : 'off'}`; }
+function parseAdcTest(line) { const m = line.match(/^ADC_TEST\s+samples=(\d+)\|rate_hz=([\d.]+)\|read_us=([\d.]+)\|overruns=(\d+)\|frame_bps=([\d.]+)$/); if (m) $('adc-test-result').textContent = `10 秒结果：${m[1]} 轮 · ${m[2]} Hz · 每轮 ${m[3]} µs · 超时 ${m[4]} 次 · 串口帧 ${m[5]} B/s`; }
 
-async function connectSerial() { if (!('serial' in navigator)) { toast('此浏览器不支持 Web Serial；请使用 Chrome 或 Edge 打开 localhost。'); return; } if (ui.connected) { await disconnectSerial(); return; } try { ui.port = await navigator.serial.requestPort(); await ui.port.open({ baudRate: 115200 }); ui.writer = ui.port.writable.getWriter(); ui.lines = []; ui.partial = ''; setConnection(true); toast('已连接。正在读取板卡信息…'); readSerial(); send('info'); } catch (error) { toast(`未能连接：${error.message}`); } }
-async function disconnectSerial() { try { if (ui.reader) { await ui.reader.cancel(); ui.reader.releaseLock(); } if (ui.writer) ui.writer.releaseLock(); if (ui.port) await ui.port.close(); } catch (_) {} finally { ui.reader = ui.writer = ui.port = null; setConnection(false); toast('USB 串口已断开'); } }
-async function readSerial() { const decoder = new TextDecoder(); try { ui.reader = ui.port.readable.getReader(); while (ui.port.readable) { const { value, done } = await ui.reader.read(); if (done) break; if (value) consume(decoder.decode(value, { stream: true })); } } catch (error) { if (ui.connected) toast(`串口读取中断：${error.message}`); } }
-function consume(chunk) { const pieces = (ui.partial + chunk).replace(/\r/g, '').split('\n'); ui.partial = pieces.pop(); pieces.filter(Boolean).forEach((line) => { ui.lines.push(line); parseAdc(line); parseAdcTest(line); parseOptocoupler(line); parseWifi(line); }); while (ui.lines.length > 120) ui.lines.shift(); const joined = ui.lines.join('\n'); parseInfo(joined); parseWifiScan(joined); }
-function parseInfo(text) { const chip = text.match(/Chip model\s*:\s*([^,\n]+)/); if (chip) $('chip-value').textContent = chip[1].trim(); const flash = text.match(/Flash\s*:\s*(?:read-error, )?(\d+) bytes/); if (flash) $('flash-value').textContent = `${(Number(flash[1]) / 1048576).toFixed(0)} MB`; const heap = text.match(/Heap free\/min\s*:\s*(\d+)\s*\/\s*(\d+)/); if (heap) $('heap-value').textContent = `${Math.round(Number(heap[1]) / 1024)} KB`; const reset = text.match(/Reset reason\s*:\s*([^\n(]+)/); if (reset) $('reset-value').textContent = reset[1].trim(); const mac = text.match(/MAC address\s*:\s*([0-9A-F:]{17})/i); if (mac) $('mac-input').value = mac[1].toUpperCase(); }
-function parseWifi(line) { const status = line.match(/^WIFI_STATUS\s+([^|\n]+)\|([^|\n]+)\|(-?\d+)/); if (status) { const ssid = status[1].trim(), ip = status[2].trim(), rssi = Number(status[3]); if (ui.wifiConnectedAt === null) ui.wifiConnectedAt = Date.now(); ui.wifiConnecting = false; $('wifi-name').textContent = ssid; $('wifi-detail').textContent = `IP ${ip} · 信号每 200 ms 更新`; $('ip-input').value = ip; $('rssi-value').textContent = rssi; refreshWifiDuration(); setSignal(rssi); return; } const connecting = line.match(/^\[TEST\] Connecting to Wi-Fi SSID:\s*(.+)$/); if (connecting) { setWifiConnecting(connecting[1].trim()); return; } const attempt = line.match(/^\[TEST\] Trying (.+)$/); if (attempt && ui.wifiConnecting) { $('wifi-detail').textContent = `正在认证：${attempt[1]}`; return; } if (/^WIFI_DISCONNECT\b/.test(line) && ui.wifiConnecting) { $('wifi-detail').textContent = '正在切换接入点并继续认证…'; return; } const state = line.match(/^WIFI_STATE\s+(\d+)\|/); if ((state && state[1] !== '3') || /^WIFI_DISCONNECT\b/.test(line) || /^\[OK\] Saved Wi-Fi credentials removed/.test(line)) { setWifiDisconnected('开发板当前未连接 Wi-Fi；需要时请手动连接。'); return; } const failed = line.match(/^\[FAIL\] Wi-Fi connection failed \(status (\d+)\)/); if (failed) { const reason = failed[1] === '6' ? '密码不匹配' : `状态码 ${failed[1]}`; ui.wifiConnectedAt = null; ui.wifiConnecting = false; $('wifi-status').textContent = '连接失败'; $('wifi-detail').textContent = `认证失败：${reason}。请核对密码后重试。`; } }
-const parseWifiLine = parseWifi;
-parseWifi = (line) => { parseWifiLine(line); const queued = line.match(/^\[TEST\] Queued Wi-Fi connection to:\s*(.+)$/); if (queued) setWifiConnecting(queued[1].trim()); if (/^\[INFO\] Scan found/.test(line)) { $('wifi-status').textContent = '正在扫描…'; $('wifi-detail').textContent = line.replace(/^\[INFO\]\s*/, ''); } if (/Wi-Fi retry scheduled/.test(line)) { $('wifi-status').textContent = '自动重试等待中'; $('wifi-detail').textContent = line.replace(/^\[INFO\]\s*/, ''); } };
-const parseAutomaticWifi = parseWifi;
-parseWifi = (line) => { parseAutomaticWifi(line); const progress = line.match(/^WIFI_PROGRESS\s+([^|]+)\|(.+)$/); if (!progress) return; const [, phase, ssid] = progress; if (phase === 'online') return; ui.wifiConnecting = true; $('wifi-status').textContent = phase === 'retry-wait' ? '自动重试等待中' : '正在自动连接…'; $('wifi-name').textContent = ssid; $('wifi-detail').textContent = phase === 'scanning' ? '正在扫描固定家庭网络…' : phase.startsWith('associating') ? '正在认证并获取局域网地址…' : '准备自动连接固定家庭网络…'; };
-function parseWifiScan(text) { if (!$('network-count')) return; const count = text.match(/Wi-Fi radio works;\s*(\d+) network/); if (!count) return; const rows = [...text.matchAll(/^\s*\d+\. RSSI\s*(-?\d+) dBm\s+CH\s*\d+\s+(.+)$/gm)].map((m) => ({ rssi: Number(m[1]), ssid: m[2].trim() })); $('network-count').textContent = count[1]; renderNetworks(rows); const best = rows.reduce((a, b) => !a || b.rssi > a.rssi ? b : a, null); if (!best || ui.wifiConnectedAt !== null || ui.wifiConnecting) return; $('wifi-name').textContent = best.ssid; $('wifi-detail').textContent = '附近最强信号 · 当前尚未配置联网'; $('rssi-value').textContent = best.rssi; $('wifi-status').textContent = `扫描到 ${count[1]} 个网络`; setSignal(best.rssi); }
-function setSignal(rssi) { const pct = Math.max(4, Math.min(100, ((rssi + 95) / 60) * 100)); $('wifi-fill').style.width = `${pct}%`; $('signal-label').textContent = rssi >= -55 ? '强' : rssi >= -70 ? '良好' : rssi >= -82 ? '一般' : '弱'; document.querySelector('.signal-visual').classList.add('active'); }
-function renderNetworks(rows) { const list = $('network-list'); list.replaceChildren(); if (!rows.length) { const li = document.createElement('li'); li.textContent = '扫描完成；网络明细尚在接收。'; list.append(li); return; } rows.sort((a, b) => b.rssi - a.rssi).forEach((network, index) => { const li = document.createElement('li'); const button = document.createElement('button'); button.className = 'network-choice'; button.textContent = network.ssid === '<hidden>' ? '隐藏网络（请手动填写）' : network.ssid; button.disabled = network.ssid === '<hidden>'; button.onclick = () => { $('wifi-ssid-input').value = network.ssid; if (knownWifi[network.ssid]) { $('wifi-password-input').value = knownWifi[network.ssid]; setWifiConnecting(network.ssid); send(`wifi ${encodeURIComponent(network.ssid)}|${encodeURIComponent(knownWifi[network.ssid])}`); } else { toast(`已选中 ${network.ssid}`); } }; const strength = document.createElement('span'); strength.textContent = `${network.rssi} dBm${index === 0 ? ' · 推荐' : ''}`; li.append(button, strength); list.append(li); }); }
-
-function parseAdc(line) { const frame = line.match(/^ADC_FRAME\s+(\d+)\|(\d+)\|(\d+)\|(\d+)$/); if (frame) { adcKeys.forEach((key, index) => updateAdc(key, Number(frame[index + 1]))); $('sensors-tag').textContent = '5 ms 采样 · 20 ms 上报'; return; } const legacy = line.match(/^ADC_STATUS\s+([^|\n]+)\|\d+\|(\d+)$/); if (legacy) { updateAdc(legacy[1], Number(legacy[2])); $('sensors-tag').textContent = '旧固件 · 200 ms 上报'; } }
-function updateAdc(key, millivolts) { const sample = ui.adc[key], card = document.querySelector(`[data-adc="${key}"]`); if (!sample || !card) return; sample.history.push(millivolts); sample.history.shift(); sample.hasSample = true; card.querySelector('.adc-value strong').textContent = (millivolts / 1000).toFixed(3); card.querySelector('.lamp').textContent = '原始采样'; drawScope(key); }
-function drawScope(key) { const card = document.querySelector(`[data-adc="${key}"]`); const canvas = card?.querySelector('.adc-scope'); if (!canvas) return; const context = canvas.getContext('2d'), { width, height } = canvas; const sample = ui.adc[key]; context.fillStyle = '#050b05'; context.fillRect(0, 0, width, height); context.strokeStyle = '#17451d'; context.lineWidth = 1; for (let x = 0; x < width; x += 26) { context.beginPath(); context.moveTo(x + .5, 0); context.lineTo(x + .5, height); context.stroke(); } for (let y = 0; y < height; y += 17) { context.beginPath(); context.moveTo(0, y + .5); context.lineTo(width, y + .5); context.stroke(); } context.strokeStyle = sample.hasSample ? '#22ef48' : '#49704d'; context.lineWidth = 1.5; context.beginPath(); sample.history.forEach((mv, index) => { const x = index * width / (sample.history.length - 1); const y = height - 2 - Math.min(height - 4, mv / 3300 * (height - 4)); index ? context.lineTo(x, y) : context.moveTo(x, y); }); context.stroke(); context.fillStyle = '#8cff9b'; context.font = '10px monospace'; context.fillText(sample.hasSample ? '0–3.3 V · newest →' : '等待 USB 数据', 5, 12); }
-function parseAdcTest(line) { const result = line.match(/^ADC_TEST\s+samples=(\d+)\|rate_hz=([\d.]+)\|read_us=([\d.]+)\|overruns=(\d+)\|frame_bps=([\d.]+)$/); if (!result) return; const [, samples, rate, readUs, overruns, frameBps] = result; $('adc-test-result').textContent = `10 秒结果：${samples} 轮 · ${rate} Hz · 每轮 ${readUs} µs · 超时 ${overruns} 次 · 串口帧 ${frameBps} B/s`; }
-function parseOptocoupler(line) { const status = line.match(/^OPTO_STATUS\s+(power|mode)\|(\d+)\|(0|1)$/); if (!status) return; const [, key, gpio, active] = status; const article = document.querySelector(`[data-opto="${key}"]`); if (!article) return; const enabled = active === '1'; article.querySelector('.opto-status').textContent = enabled ? `GPIO${gpio} · 已导通` : `GPIO${gpio} · 已断开`; const indicator = article.querySelector('.switch'); indicator.classList.toggle('on', enabled); indicator.classList.toggle('off', !enabled); indicator.setAttribute('aria-label', enabled ? '光耦已导通' : '光耦已断开'); }
-adcKeys.forEach(drawScope);
-navigator.serial?.addEventListener('disconnect', () => { if (ui.connected) { setConnection(false); toast('开发板已从 USB 断开'); } });
+['alias', 'purifier', 'room'].forEach(key => { if (saved[key]) $(`${key}-input`).value = saved[key]; });
+$('save-button').onclick = () => { localStorage.setItem('purifier-console-device', JSON.stringify({ alias: $('alias-input').value.trim(), purifier: $('purifier-input').value.trim(), room: $('room-input').value.trim() })); refreshIdentity(); $('save-state').textContent = '资料已保存到本浏览器。'; };
+['alias-input', 'room-input'].forEach(id => $(id).addEventListener('input', refreshIdentity));
+$('connect-button').onclick = connectSerial; $('info-button').onclick = () => send('info'); $('blink-button').onclick = () => send('blink'); $('reboot-button').onclick = () => { if (confirm('确认重启当前 ESP32-C3？')) { $('wifi-status').textContent = '板卡正在重启…'; $('wifi-detail').textContent = 'USB CDC 会短暂重置；页面将自动继续读取。'; send('reboot'); } }; $('adc-test-button').onclick = () => send('adc test'); document.querySelectorAll('[data-opto-command]').forEach(button => button.onclick = () => send(button.dataset.optoCommand));
+navigator.serial?.addEventListener('disconnect', () => { if (ui.connected) disconnectSerial(); });
+refreshIdentity(); setConnection(false); adcKeys.forEach(drawScope);

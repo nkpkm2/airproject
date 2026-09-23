@@ -108,6 +108,7 @@ void publishHeartbeat() {
 void publishDiagnostic(const String& event) {
   publishMqtt(topicFor("diagnostic"), "{\"uptime_ms\":" + String(millis()) + ",\"event\":\"" + event + "\"}");
 }
+void emitMqttState() { Serial.printf("MQTT_STATE %s\n", mqttOnline ? "online" : "offline"); }
 String jsonStringField(const String& json, const char* name) {
   const String key = "\"" + String(name) + "\"";
   const int keyStart = json.indexOf(key);
@@ -153,7 +154,8 @@ void handleMqttCommand(const char* data, int length) {
 }
 esp_err_t mqttEvent(esp_mqtt_event_handle_t event) {
   if (event->event_id == MQTT_EVENT_CONNECTED) { mqttOnline = true; esp_mqtt_client_subscribe(event->client, mqttCommandTopic.c_str(), 1); publishMqtt(mqttAvailabilityTopic, "online", 1, true); publishState(); Serial.println("MQTT_STATE online"); }
-  else if (event->event_id == MQTT_EVENT_DISCONNECTED) { mqttOnline = false; Serial.println("MQTT_STATE offline"); }
+  else if (event->event_id == MQTT_EVENT_DISCONNECTED) { mqttOnline = false; emitMqttState(); }
+  else if (event->event_id == MQTT_EVENT_ERROR) { mqttOnline = false; Serial.println("MQTT_STATE error"); }
   else if (event->event_id == MQTT_EVENT_DATA && event->topic && String(event->topic, event->topic_len) == mqttCommandTopic) handleMqttCommand(event->data, event->data_len);
   return ESP_OK;
 }
@@ -552,7 +554,7 @@ void runCommand(String command) {
   normalized.toLowerCase();
 
   if (normalized == "help") printHelp();
-  else if (normalized == "info") { printBoardInfo(); emitOptocouplerStatus(); emitWifiState(); emitWifiProgress(); }
+  else if (normalized == "info") { printBoardInfo(); emitOptocouplerStatus(); emitWifiState(); emitWifiProgress(); emitMqttState(); }
   else if (normalized == "scan") scanWifi();
   else if (normalized == "led on") { setLed(true); Serial.println("[OK] LED on"); }
   else if (normalized == "led off") { setLed(false); Serial.println("[OK] LED off"); }

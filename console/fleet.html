@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#000080">
+  <title>家庭空气管理</title>
+  <link rel="stylesheet" href="fleet.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="fleet.html"><span class="brand-mark">◌</span><span>家庭空气管理</span></a>
+    <nav class="view-nav" aria-label="视图切换"><a class="active" href="fleet.html">家庭总览</a><a href="index.html">板卡调试</a></nav>
+    <div class="top-summary"><span><b id="online-count">0</b> 在线</span><span><b id="pending-count">0</b> 等待响应</span><span class="divider"></span><span class="legend"><i class="low"></i>低速 <i class="medium"></i>中速 <i class="high"></i>高速 <i class="auto"></i>自动 <i class="off"></i>关机 <i class="offline"></i>离线</span></div>
+  </header>
+
+  <main class="shell">
+    <aside id="library" class="library">
+      <div class="section-head"><div><p>设备库</p><h1>净化器</h1></div><span id="device-count" class="count">0</span></div>
+      <div class="fleet-stats" aria-label="净化器状态统计">
+        <div><b id="stat-online">0</b><span>在线</span></div>
+        <div><b id="stat-offline">0</b><span>离线</span></div>
+        <div><b id="stat-running">0</b><span>开启</span></div>
+        <div><b id="stat-off">0</b><span>关闭</span></div>
+      </div>
+      <div id="device-list" class="device-list"></div>
+      <p class="library-note">左键可连续点按，系统直接等待最后目标档位确认。勾选设备或房间后，可用顶部按钮批量设置。右键短按编辑或关机；右键长按并拖动可重新摆放。</p>
+    </aside>
+
+    <section id="home" class="home">
+      <div class="home-head"><div><p>操作区</p><h2 id="selected-title">家庭总览</h2></div><div id="command-panel" class="command-panel"><span id="command-scope">已选 0 台</span><div class="mode-buttons"><button data-command="off">关机</button><button data-command="low">低速</button><button data-command="medium">中速</button><button data-command="high">高速</button><button data-command="auto">自动</button></div></div></div>
+      <div id="floor-plan" class="floor-plan" aria-label="简化户型图">
+        <div class="room living" data-room="客厅"><span>客厅</span></div>
+        <div class="room dining" data-room="餐厅"><span>餐厅</span></div>
+        <div class="room bedroom-a" data-room="主卧"><span>主卧</span></div>
+        <div class="room bedroom-b" data-room="次卧"><span>次卧</span></div>
+        <div class="room study" data-room="书房"><span>书房</span></div>
+        <div class="room kitchen" data-room="厨房"><span>厨房</span></div>
+        <div class="room hallway" data-room="走廊"><span>玄关 / 走廊</span></div>
+        <div class="room bath"><span>卫生间</span></div>
+        <div id="plan-layer" aria-label="可拖动净化器位置"></div>
+      </div>
+    </section>
+  </main>
+
+  <div id="context-menu" class="context-menu" hidden><div class="context-title">设备信息</div><label>设备别名<input id="edit-alias"></label><label>净化器编号<input id="edit-id"></label><dl id="device-details"></dl><div class="context-actions"><button id="save-device">保存修改</button><button id="shutdown-device" class="shutdown">关机</button></div><button id="close-context" class="close-context">关闭</button></div>
+  <script src="fleet.js"></script>
+</body>
+</html>

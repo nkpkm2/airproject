@@ -1,11 +1,11 @@
 """Dependency-free local MQTT control service for Windows development."""
 from __future__ import annotations
 
-import json, os, subprocess, threading, time
+import json, os, re, subprocess, threading, time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 ROOT = Path(__file__).parent
@@ -19,6 +19,52 @@ DEGRADED_GRACE_MS = 30_000
 EXPLICIT_OFFLINE_GRACE_MS = 10_000
 MAX_PENDING_COMMANDS = 3
 MAX_COMMAND_HISTORY = 50
+CATALOG_PATH = ROOT / "data" / "device_catalog.json"
+DEFAULT_ROOMS = ["客厅", "餐厅", "主卧", "次卧", "书房", "厨房", "玄关 / 走廊"]
+
+def load_catalog() -> dict:
+    try:
+        data = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+        return {
+            "rooms": list(data.get("rooms", DEFAULT_ROOMS)),
+            "groups": list(data.get("groups", [])),
+            "devices": dict(data.get("devices", {})),
+        }
+    except (OSError, ValueError, TypeError):
+        return {"rooms": list(DEFAULT_ROOMS), "groups": [], "devices": {}}
+
+CATALOG = load_catalog()
+
+def save_catalog() -> None:
+    CATALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = CATALOG_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(CATALOG, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(CATALOG_PATH)
+
+def device_profile(device_id: str) -> dict:
+    profile = CATALOG["devices"].setdefault(device_id, {
+        "alias": device_id,
+        "purifier_number": "",
+        "room": "未分配",
+        "group_ids": [],
+        "hidden": False,
+    })
+    return profile
+
+def public_catalog() -> dict:
+    return {
+        "rooms": list(CATALOG["rooms"]),
+        "groups": list(CATALOG["groups"]),
+        "devices": {key: dict(value) for key, value in CATALOG["devices"].items()},
+    }
+
+def safe_group_id(name: str) -> str:
+    stem = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "group"
+    candidate, suffix = stem, 2
+    used = {item["id"] for item in CATALOG["groups"]}
+    while candidate in used:
+        candidate, suffix = f"{stem}-{suffix}", suffix + 1
+    return candidate
 
 def mqtt_args(exe: str) -> list[str]:
     return [str(MQTT / exe), "-h", ENV["MQTT_HOST"], "-p", ENV["MQTT_PORT"], "-u", ENV["MQTT_USERNAME"], "-P", ENV["MQTT_PASSWORD"]]
@@ -102,6 +148,16 @@ def subscribe() -> None:
                     body = payload if category == "availability" else {"raw": payload}
                 with LOCK:
                     record = DEVICES.setdefault(device_id, {"device_id": device_id})
+                    is_new_profile = device_id not in CATALOG["devices"]
+                    profile = device_profile(device_id)
+                    # Deleting removes a device from the directory, not from
+                    # the network. A later MQTT online announcement proves a
+                    # new session and automatically discovers it again.
+                    rediscovered = category == "availability" and body == "online" and profile.get("hidden")
+                    if rediscovered:
+                        profile["hidden"] = False
+                    if is_new_profile or rediscovered:
+                        save_catalog()
                     record[category] = body
                     observed_at = int(time.time() * 1000)
                     record["last_seen_ms"] = observed_at
@@ -136,19 +192,24 @@ class Handler(BaseHTTPRequestHandler):
         # PC, so explicitly permit the trusted local development console.
         self.send_header("Access-Control-Allow-Origin", "http://localhost:8765")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
         self.end_headers(); self.wfile.write(raw)
     def do_OPTIONS(self) -> None:
         return self.reply(204, {})
     def do_GET(self) -> None:
         if urlparse(self.path).path == "/health": return self.reply(200, {"status": "ok", "runtime": "stdlib"})
+        if urlparse(self.path).path == "/api/v1/catalog":
+            with LOCK: return self.reply(200, public_catalog())
         if urlparse(self.path).path == "/api/v1/devices":
             with LOCK:
                 now = int(time.time() * 1000)
                 devices = []
                 for source in DEVICES.values():
+                    profile = device_profile(source["device_id"])
+                    if profile.get("hidden"): continue
                     expire_commands(source, now)
                     record = dict(source)
+                    record["profile"] = dict(profile)
                     age = now - record.get("last_seen_ms", 0)
                     connection_state, signal_age = classify_connection(record, now)
                     record["last_seen_age_ms"] = age
@@ -165,7 +226,24 @@ class Handler(BaseHTTPRequestHandler):
                     devices.append(record)
                 return self.reply(200, devices)
         return self.reply(404, {"error": "not found"})
+    def read_json(self) -> dict:
+        return json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
     def do_POST(self) -> None:
+        path = urlparse(self.path).path
+        if path in {"/api/v1/rooms", "/api/v1/groups"}:
+            try:
+                body = self.read_json(); name = str(body.get("name", "")).strip()[:40]
+                if not name: return self.reply(400, {"error": "name is required"})
+                with LOCK:
+                    if path.endswith("rooms"):
+                        if name not in CATALOG["rooms"]: CATALOG["rooms"].append(name)
+                        result = {"name": name}
+                    else:
+                        item = {"id": safe_group_id(name), "name": name, "parent_id": body.get("parent_id") or None}
+                        CATALOG["groups"].append(item); result = item
+                    save_catalog()
+                return self.reply(201, result)
+            except Exception as error: return self.reply(400, {"error": str(error)})
         parts = urlparse(self.path).path.split("/")
         if len(parts) != 6 or parts[1:4] != ["api", "v1", "devices"] or parts[5] != "commands": return self.reply(404, {"error": "not found"})
         try:
@@ -198,6 +276,50 @@ class Handler(BaseHTTPRequestHandler):
                     item = command_for(DEVICES[device_id], body["request_id"])
                     if item: item.update(status="failed", completed_at_ms=int(time.time() * 1000), error=str(error))
                 return self.reply(503, {"request_id": body["request_id"], "status": "failed", "error": str(error)})
+        except Exception as error: return self.reply(400, {"error": str(error)})
+    def do_PATCH(self) -> None:
+        parts = urlparse(self.path).path.split("/")
+        if len(parts) != 5 or parts[1:4] != ["api", "v1", "devices"]:
+            return self.reply(404, {"error": "not found"})
+        try:
+            body = self.read_json(); device_id = parts[4]
+            with LOCK:
+                profile = device_profile(device_id)
+                for key in ("alias", "purifier_number", "room"):
+                    if key in body: profile[key] = str(body[key]).strip()[:64]
+                if "group_ids" in body:
+                    valid = {item["id"] for item in CATALOG["groups"]}
+                    profile["group_ids"] = [str(value) for value in body["group_ids"] if str(value) in valid]
+                profile["hidden"] = False
+                save_catalog(); result = dict(profile)
+            return self.reply(200, result)
+        except Exception as error: return self.reply(400, {"error": str(error)})
+    def do_DELETE(self) -> None:
+        parts = urlparse(self.path).path.split("/")
+        try:
+            with LOCK:
+                if len(parts) == 5 and parts[1:4] == ["api", "v1", "devices"]:
+                    profile = device_profile(parts[4]); profile["hidden"] = True; save_catalog()
+                    return self.reply(200, {"status": "hidden", "device_id": parts[4]})
+                if len(parts) == 5 and parts[1:4] == ["api", "v1", "rooms"]:
+                    name = unquote(parts[4])
+                    if name in CATALOG["rooms"]: CATALOG["rooms"].remove(name)
+                    for profile in CATALOG["devices"].values():
+                        if profile.get("room") == name: profile["room"] = "未分配"
+                    save_catalog(); return self.reply(200, {"status": "deleted"})
+                if len(parts) == 5 and parts[1:4] == ["api", "v1", "groups"]:
+                    group_id = parts[4]
+                    descendants = {group_id}
+                    changed = True
+                    while changed:
+                        before = len(descendants)
+                        descendants.update(item["id"] for item in CATALOG["groups"] if item.get("parent_id") in descendants)
+                        changed = len(descendants) != before
+                    CATALOG["groups"] = [item for item in CATALOG["groups"] if item["id"] not in descendants]
+                    for profile in CATALOG["devices"].values():
+                        profile["group_ids"] = [value for value in profile.get("group_ids", []) if value not in descendants]
+                    save_catalog(); return self.reply(200, {"status": "deleted"})
+            return self.reply(404, {"error": "not found"})
         except Exception as error: return self.reply(400, {"error": str(error)})
     def log_message(self, *_: object) -> None: pass
 

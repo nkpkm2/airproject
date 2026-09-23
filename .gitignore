@@ -12,6 +12,7 @@ control-service/mosquitto/data/
 control-service/mosquitto/log/
 control-service/mosquitto/passwords
 control-service/.env
+control-service/data/
 control-service/.venv/
 console/local-config.js
 include/private_config.h

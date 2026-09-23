@@ -56,5 +56,31 @@ class DevServerStateTests(unittest.TestCase):
         self.assertIn("15 秒", item["error"])
 
 
+class DeviceCatalogTests(unittest.TestCase):
+    def setUp(self):
+        self.original_catalog = server.CATALOG
+        server.CATALOG = {"rooms": ["客厅"], "groups": [], "devices": {}}
+
+    def tearDown(self):
+        server.CATALOG = self.original_catalog
+
+    def test_new_device_profile_has_stable_defaults(self):
+        profile = server.device_profile("pur-test")
+        self.assertEqual(profile["alias"], "pur-test")
+        self.assertEqual(profile["room"], "未分配")
+        self.assertFalse(profile["hidden"])
+        self.assertIs(profile, server.device_profile("pur-test"))
+
+    def test_group_ids_are_unique(self):
+        server.CATALOG["groups"].append({"id": "group", "name": "Group", "parent_id": None})
+        self.assertEqual(server.safe_group_id("Group"), "group-2")
+
+    def test_public_catalog_is_not_a_mutable_device_alias(self):
+        server.device_profile("pur-test")
+        exported = server.public_catalog()
+        exported["devices"]["pur-test"]["alias"] = "changed"
+        self.assertEqual(server.CATALOG["devices"]["pur-test"]["alias"], "pur-test")
+
+
 if __name__ == "__main__":
     unittest.main()

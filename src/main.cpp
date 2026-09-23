@@ -19,7 +19,7 @@ constexpr uint32_t kAdcTestDurationMs = 10000;
 String commandBuffer;
 Preferences preferences;
 uint32_t lastWifiStatusMs = 0;
-uint32_t wifiRetryAtMs = 2000;
+uint32_t wifiRetryAtMs = 300;
 uint8_t wifiRetryFailures = 0;
 struct WifiCandidate {
   uint8_t bssid[6];
@@ -37,6 +37,8 @@ String wifiTargetSsid;
 String wifiTargetPassword;
 uint32_t lastHeartbeatMs = 0;
 uint32_t lastMqttTelemetryMs = 0;
+uint32_t lastStatusLedMs = 0;
+uint32_t telemetryIntervalMs = 100;
 esp_mqtt_client_handle_t mqttClient = nullptr;
 bool mqttOnline = false;
 bool telemetryEnabled = false;
@@ -94,9 +96,16 @@ void publishAck(const String& requestId, const char* result) {
 void publishState() {
   if (!mqttOnline) return;
   char body[256];
-  snprintf(body, sizeof(body), "{\"schema\":1,\"device_id\":\"%s\",\"powered\":false,\"mode\":\"unknown\",\"adc_mv\":[%lu,%lu,%lu,%lu],\"opto\":{\"power\":%s,\"mode\":%s},\"wifi\":{\"rssi_dbm\":%d,\"ip\":\"%s\"}}",
-           deviceId().c_str(), static_cast<unsigned long>(adcMillivolts[0]), static_cast<unsigned long>(adcMillivolts[1]), static_cast<unsigned long>(adcMillivolts[2]), static_cast<unsigned long>(adcMillivolts[3]), optocouplerActive[0] ? "true" : "false", optocouplerActive[1] ? "true" : "false", WiFi.RSSI(), WiFi.localIP().toString().c_str());
+  snprintf(body, sizeof(body), "{\"schema\":1,\"device_id\":\"%s\",\"powered\":false,\"mode\":\"unknown\",\"uptime_ms\":%lu,\"adc_mv\":[%lu,%lu,%lu,%lu],\"opto\":{\"power\":%s,\"mode\":%s},\"wifi\":{\"ssid\":\"%s\",\"rssi_dbm\":%d,\"ip\":\"%s\"}}",
+           deviceId().c_str(), static_cast<unsigned long>(millis()), static_cast<unsigned long>(adcMillivolts[0]), static_cast<unsigned long>(adcMillivolts[1]), static_cast<unsigned long>(adcMillivolts[2]), static_cast<unsigned long>(adcMillivolts[3]), optocouplerActive[0] ? "true" : "false", optocouplerActive[1] ? "true" : "false", WiFi.SSID().c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str());
   publishMqtt(topicFor("state"), body, 1, true);
+}
+void publishHeartbeat() {
+  publishMqtt(topicFor("heartbeat"), "{\"uptime_ms\":" + String(millis()) +
+    ",\"rssi_dbm\":" + String(WiFi.RSSI()) + ",\"ip\":\"" + WiFi.localIP().toString() + "\"}");
+}
+void publishDiagnostic(const String& event) {
+  publishMqtt(topicFor("diagnostic"), "{\"uptime_ms\":" + String(millis()) + ",\"event\":\"" + event + "\"}");
 }
 String jsonStringField(const String& json, const char* name) {
   const String key = "\"" + String(name) + "\"";
@@ -109,6 +118,19 @@ String jsonStringField(const String& json, const char* name) {
   const int valueEnd = json.indexOf('"', valueStart + 1);
   return valueEnd < 0 ? "" : json.substring(valueStart + 1, valueEnd);
 }
+int jsonIntField(const String& json, const char* name, int fallback) {
+  const String key = "\"" + String(name) + "\"";
+  const int keyStart = json.indexOf(key);
+  if (keyStart < 0) return fallback;
+  const int colon = json.indexOf(':', keyStart + key.length());
+  if (colon < 0) return fallback;
+  int start = colon + 1;
+  while (start < static_cast<int>(json.length()) && (json[start] == ' ' || json[start] == '\t')) ++start;
+  int end = start;
+  if (json[end] == '-') ++end;
+  while (end < static_cast<int>(json.length()) && isDigit(json[end])) ++end;
+  return end == start ? fallback : json.substring(start, end).toInt();
+}
 void handleMqttCommand(const char* data, int length) {
   String command(data, length);
   const String requestId = jsonStringField(command, "request_id");
@@ -117,7 +139,15 @@ void handleMqttCommand(const char* data, int length) {
   else if (type == "opto.power.on") { setOptocoupler(0, true); publishAck(requestId, "ok"); }
   else if (type == "opto.power.off") { setOptocoupler(0, false); publishAck(requestId, "ok"); }
   else if (type == "opto.mode.pulse") { pulseOptocoupler(1); publishAck(requestId, "ok"); }
-  else if (type == "debug.configure") { telemetryEnabled = command.indexOf("\"adc_stream_hz\":0") < 0; telemetryExpiresAtMs = millis() + 60000; publishAck(requestId, "ok"); }
+  else if (type == "debug.configure") {
+    const int requestedHz = constrain(jsonIntField(command, "adc_stream_hz", 0), 0, 20);
+    const int requestedDuration = constrain(jsonIntField(command, "expires_in_s", 60), 1, 600);
+    telemetryEnabled = requestedHz > 0;
+    telemetryIntervalMs = requestedHz ? 1000 / requestedHz : 1000;
+    telemetryExpiresAtMs = millis() + static_cast<uint32_t>(requestedDuration) * 1000UL;
+    publishDiagnostic(telemetryEnabled ? "remote diagnostics enabled" : "remote diagnostics disabled");
+    publishAck(requestId, "ok");
+  }
   else publishAck(requestId, "unsupported");
 }
 esp_err_t mqttEvent(esp_mqtt_event_handle_t event) {
@@ -149,6 +179,21 @@ void blinkLed(uint8_t count, uint16_t onMs = 100, uint16_t offMs = 100) {
     delay(onMs);
     setLed(false);
     delay(offMs);
+  }
+}
+
+void tickStatusLed() {
+  static bool fastBlinkOn = false;
+  if (WiFi.status() != WL_CONNECTED) {
+    if (fastBlinkOn) { fastBlinkOn = false; setLed(false); }
+    return;
+  }
+  // A rapid blue blink means the board has Wi-Fi and is reachable by the
+  // local control system. It deliberately does not encode purifier mode.
+  if (millis() - lastStatusLedMs >= 110) {
+    lastStatusLedMs = millis();
+    fastBlinkOn = !fastBlinkOn;
+    setLed(fastBlinkOn);
   }
 }
 
@@ -522,7 +567,8 @@ void setup() {
 
   Serial.begin(kSerialBaud);
   const uint32_t waitStarted = millis();
-  while (!Serial && millis() - waitStarted < 3000) delay(10);
+  // Networking must start promptly even when USB serial is not attached.
+  while (!Serial && millis() - waitStarted < 250) delay(10);
 
   WiFi.onEvent(onWifiEvent);
   WiFi.mode(WIFI_STA);
@@ -537,7 +583,6 @@ void setup() {
   printBoardInfo();
   Serial.println("[PASS] Firmware booted and USB serial is responding.");
   blinkLed(3, 120, 120);
-  scanWifi();
   if (!preferences.getString("ssid", "").isEmpty()) {
     Serial.println("[INFO] Saved Wi-Fi will connect automatically in the background.");
   }
@@ -573,9 +618,18 @@ void loop() {
     lastAdcFrameMs = millis();
     emitAdcFrame();
   }
-  if (telemetryEnabled && mqttOnline && millis() - lastMqttTelemetryMs >= 50) { lastMqttTelemetryMs = millis(); publishMqtt(topicFor("telemetry"), "{\"adc_mv\":[" + String(adcMillivolts[0]) + "," + String(adcMillivolts[1]) + "," + String(adcMillivolts[2]) + "," + String(adcMillivolts[3]) + "]}"); }
-  if (telemetryEnabled && static_cast<int32_t>(millis() - telemetryExpiresAtMs) >= 0) telemetryEnabled = false;
+  if (mqttOnline && millis() - lastHeartbeatMs >= 2000) {
+    lastHeartbeatMs = millis();
+    publishHeartbeat();
+    publishState();
+  }
+  if (telemetryEnabled && mqttOnline && millis() - lastMqttTelemetryMs >= telemetryIntervalMs) {
+    lastMqttTelemetryMs = millis();
+    publishMqtt(topicFor("telemetry"), "{\"uptime_ms\":" + String(millis()) + ",\"adc_mv\":[" + String(adcMillivolts[0]) + "," + String(adcMillivolts[1]) + "," + String(adcMillivolts[2]) + "," + String(adcMillivolts[3]) + "],\"opto\":{\"power\":" + String(optocouplerActive[0] ? "true" : "false") + ",\"mode\":" + String(optocouplerActive[1] ? "true" : "false") + "}}");
+  }
+  if (telemetryEnabled && static_cast<int32_t>(millis() - telemetryExpiresAtMs) >= 0) { telemetryEnabled = false; publishDiagnostic("remote diagnostics expired"); }
   finishAdcTestIfReady();
   updateOptocouplerPulses();
+  tickStatusLed();
   delay(0);
 }

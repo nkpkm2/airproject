@@ -1,3 +1,4 @@
+window.name='air-fleet-console';
 const seedDevices=[
 {id:'PUR-001',alias:'客厅主机',rooms:['客厅'],ip:'192.168.1.181',mac:'E8:3D:C1:95:15:34',state:'auto',online:true,x:27,y:43},
 {id:'PUR-002',alias:'卧室净化器',rooms:['主卧'],ip:'192.168.1.182',mac:'B4:8A:0A:22:51:90',state:'low',online:true,x:79,y:18},

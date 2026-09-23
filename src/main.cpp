@@ -22,6 +22,10 @@ Preferences preferences;
 uint32_t lastWifiStatusMs = 0;
 uint32_t wifiRetryAtMs = 300;
 uint8_t wifiRetryFailures = 0;
+uint32_t wifiAttemptNumber = 0;
+volatile bool wifiDisconnectPending = false;
+volatile uint8_t wifiDisconnectReason = 0;
+bool wifiBssidRecovery = false;
 struct WifiCandidate {
   uint8_t bssid[6];
   int32_t rssi;
@@ -69,6 +73,8 @@ uint32_t optocouplerPulseOffAtMs[] = {0, 0};
 void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
   if (event != ARDUINO_EVENT_WIFI_STA_DISCONNECTED) return;
   const auto reason = static_cast<wifi_err_reason_t>(info.wifi_sta_disconnected.reason);
+  wifiDisconnectReason = static_cast<uint8_t>(reason);
+  wifiDisconnectPending = true;
   Serial.printf("WIFI_DISCONNECT reason=%u|%s\n",
                 static_cast<unsigned>(reason), WiFi.disconnectReasonName(reason));
   // Reconnect is scheduled from loop(), never from the Wi-Fi event callback.
@@ -394,12 +400,32 @@ void finishAdcTestIfReady() {
 }
 
 void scheduleWifiBackoff() {
+  // One fixed household AP: retry predictably.  The previous 6–60 second
+  // exponential wait made a software reset appear stuck after a single miss.
   WiFi.disconnect(false, false);
-  wifiRetryFailures = min<uint8_t>(wifiRetryFailures + 1, 6);
-  const uint32_t retryDelayMs = min<uint32_t>(60000, 3000UL << wifiRetryFailures);
+  wifiBssidRecovery = false;
+  wifiRetryFailures = min<uint8_t>(wifiRetryFailures + 1, 4);
+  const uint32_t retryDelayMs = min<uint32_t>(12000, 1000UL << wifiRetryFailures);
   wifiRetryAtMs = millis() + retryDelayMs;
   wifiPhase = WifiPhase::Backoff;
-  Serial.printf("[INFO] Wi-Fi retry scheduled in %lu ms.\n", static_cast<unsigned long>(retryDelayMs));
+  Serial.printf("[INFO] Wi-Fi retry %u scheduled in %lu ms.\n",
+                static_cast<unsigned>(wifiRetryFailures), static_cast<unsigned long>(retryDelayMs));
+}
+
+bool startWifiRecoveryScan() {
+  // After AUTH_EXPIRE the C3 Wi-Fi driver can still own an aborted association.
+  // Starting scanNetworks() against that transaction returns WIFI_SCAN_FAILED
+  // (-2).  Rebuild STA first, then launch the asynchronous scan.
+  WiFi.scanDelete();
+  WiFi.disconnect(true, true);
+  delay(100);
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(false);
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  delay(100);
+  return WiFi.scanNetworks(true, true) != WIFI_SCAN_FAILED;
 }
 
 void beginBssidFallback() {
@@ -419,6 +445,7 @@ void completeWifiConnection() {
   preferences.putString("ssid", wifiTargetSsid);
   preferences.putString("password", wifiTargetPassword);
   wifiRetryFailures = 0;
+  wifiBssidRecovery = false;
   wifiRetryAtMs = 0;
   wifiPhase = WifiPhase::Online;
   Serial.printf("[PASS] Wi-Fi connected. IP address: %s\n", WiFi.localIP().toString().c_str());
@@ -438,9 +465,16 @@ void connectWifiCredentials(const String& ssid, const String& password) {
   wifiCandidateCount = 0;
   wifiCandidateIndex = 0;
   wifiScanRetries = 0;
+  wifiBssidRecovery = false;
+  wifiDisconnectPending = false;
   wifiRetryAtMs = 0;
-  WiFi.disconnect(false, false);
+  // Recreate STA before every association.  This avoids retaining a stale
+  // station transaction across ESP.restart() / USB CDC reset.  Credentials
+  // live in our private configuration and Preferences, not the Wi-Fi driver.
+  WiFi.disconnect(true, true);
+  delay(40);
   WiFi.mode(WIFI_STA);
+  delay(20);
   WiFi.setAutoReconnect(false);
   WiFi.persistent(false);
   WiFi.setSleep(false);
@@ -448,7 +482,9 @@ void connectWifiCredentials(const String& ssid, const String& password) {
   // One fixed household network: begin association directly. Scanning and
   // BSSID pinning were useful during installation, but can cause a needless
   // driver race and are not part of normal appliance operation.
-  Serial.printf("[TEST] Starting fixed Wi-Fi association: %s\n", ssid.c_str());
+  ++wifiAttemptNumber;
+  Serial.printf("[TEST] Starting fixed Wi-Fi association #%lu: %s\n",
+                static_cast<unsigned long>(wifiAttemptNumber), ssid.c_str());
   WiFi.begin(wifiTargetSsid.c_str(), wifiTargetPassword.c_str());
   wifiPhase = WifiPhase::Roaming;
   wifiPhaseStartedMs = millis();
@@ -457,6 +493,33 @@ void connectWifiCredentials(const String& ssid, const String& password) {
 void tickWifiConnection() {
   if ((wifiPhase == WifiPhase::Roaming || wifiPhase == WifiPhase::BssidFallback) &&
       WiFi.status() == WL_CONNECTED) { completeWifiConnection(); return; }
+
+  // Wi-Fi callbacks are deliberately write-only.  Consume a real disconnect
+  // here, in loop(), so the next operation never overlaps the driver callback.
+  if (wifiDisconnectPending && (wifiPhase == WifiPhase::Roaming || wifiPhase == WifiPhase::BssidFallback)) {
+    const uint8_t reason = wifiDisconnectReason;
+    wifiDisconnectPending = false;
+    if (wifiPhase == WifiPhase::BssidFallback) {
+      ++wifiCandidateIndex;
+      beginBssidFallback();
+      return;
+    }
+    // Authentication expiry is the observed C3/AP failure.  A direct SSID
+    // association can choose a poor AP/BSSID; scan only after such a failure
+    // and retry the visible matching BSSID explicitly.
+    wifiBssidRecovery = true;
+    wifiCandidateCount = 0;
+    wifiCandidateIndex = 0;
+    if (!startWifiRecoveryScan()) {
+      Serial.printf("[INFO] Wi-Fi recovery scan could not start after reason %u.\n", static_cast<unsigned>(reason));
+      scheduleWifiBackoff();
+      return;
+    }
+    Serial.printf("[INFO] Wi-Fi association ended (reason %u); scanning matching APs for BSSID recovery.\n", static_cast<unsigned>(reason));
+    wifiPhase = WifiPhase::Scanning;
+    wifiPhaseStartedMs = millis();
+    return;
+  }
   if (wifiPhase == WifiPhase::Online && WiFi.status() != WL_CONNECTED) {
     wifiPhase = WifiPhase::Backoff;
     wifiRetryAtMs = millis() + 2000;
@@ -472,8 +535,10 @@ void tickWifiConnection() {
     if (count < 0) {
       if (wifiScanRetries++ == 0) {
         Serial.printf("[INFO] Wi-Fi scan transient error: %d; retrying scan.\n", count);
-        WiFi.scanDelete();
-        WiFi.scanNetworks(true, true);
+        if (!startWifiRecoveryScan()) {
+          scheduleWifiBackoff();
+          return;
+        }
         wifiPhaseStartedMs = millis();
         return;
       }
@@ -489,10 +554,12 @@ void tickWifiConnection() {
       ++wifiCandidateCount;
     }
     WiFi.scanDelete();
-    Serial.printf("[INFO] Scan found %u candidate(s); trying normal SSID roaming connection.\n", static_cast<unsigned>(wifiCandidateCount));
-    WiFi.begin(wifiTargetSsid.c_str(), wifiTargetPassword.c_str());
-    wifiPhase = WifiPhase::Roaming;
-    wifiPhaseStartedMs = millis();
+    Serial.printf("[INFO] Recovery scan found %u matching AP(s).\n", static_cast<unsigned>(wifiCandidateCount));
+    if (wifiBssidRecovery && wifiCandidateCount > 0) {
+      beginBssidFallback();
+    } else {
+      scheduleWifiBackoff();
+    }
     return;
   }
   if (wifiPhase == WifiPhase::Roaming && millis() - wifiPhaseStartedMs >= 15000) {

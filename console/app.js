@@ -2,6 +2,7 @@ const $ = id => document.getElementById(id);
 const adcKeys = ['low', 'medium', 'high', 'auto'];
 const ui = { port: null, reader: null, writer: null, connected: false, manualDisconnect: false, partial: '', lines: [], wifiConnectedAt: null, adc: {}, lockId: crypto.randomUUID?.() || String(Date.now()) };
 const lockKey = 'air-control-usb-session';
+window.name = 'air-usb-console';
 const saved = JSON.parse(localStorage.getItem('purifier-console-device') || '{}');
 adcKeys.forEach(key => { ui.adc[key] = { history: Array(140).fill(0), hasSample: false }; });
 
@@ -63,7 +64,8 @@ function parseWifi(line) {
   if (status) { const [, ssid, ip, raw] = status, rssi = Number(raw); if (ui.wifiConnectedAt === null) ui.wifiConnectedAt = Date.now(); $('wifi-status').textContent = `已连接 ${formatDuration(Math.floor((Date.now() - ui.wifiConnectedAt) / 1000))}`; $('wifi-name').textContent = ssid; $('wifi-detail').textContent = `IP ${ip} · 信号每 200 ms 更新`; $('ip-input').value = ip; $('rssi-value').textContent = rssi; setSignal(rssi); return; }
   const progress = line.match(/^WIFI_PROGRESS\s+([^|]+)\|(.+)$/);
   if (progress) { const [, phase, ssid] = progress; if (phase === 'online') return; setWifiConnecting(ssid, phase === 'retry-wait' ? '自动重试等待中' : phase === 'associating' ? '正在认证…' : '正在自动连接…'); return; }
-  if (/^\[TEST\] Starting fixed Wi-Fi association:/.test(line)) { setWifiConnecting(line.split(':').pop().trim(), '正在认证…'); return; }
+  const association = line.match(/^\[TEST\] Starting fixed Wi-Fi association(?: #\d+)?:\s*(.+)$/);
+  if (association) { setWifiConnecting(association[1], '正在认证…'); return; }
   if (/WIFI_DISCONNECT|association timed out|retry scheduled/.test(line)) { $('wifi-status').textContent = '自动重试等待中'; $('wifi-detail').textContent = '本轮关联未成功；固件将自动退避后重试。'; }
 }
 function parseAdc(line) { const frame = line.match(/^ADC_FRAME\s+(\d+)\|(\d+)\|(\d+)\|(\d+)$/); if (!frame) return; adcKeys.forEach((key, i) => updateAdc(key, Number(frame[i + 1]))); $('sensors-tag').textContent = '5 ms 采样 · 20 ms 串口帧'; }

@@ -1,7 +1,7 @@
 """Dependency-free local MQTT control service for Windows development."""
 from __future__ import annotations
 
-import json, os, subprocess, threading
+import json, os, subprocess, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -17,7 +17,10 @@ def mqtt_args(exe: str) -> list[str]:
     return [str(MQTT / exe), "-h", ENV["MQTT_HOST"], "-p", ENV["MQTT_PORT"], "-u", ENV["MQTT_USERNAME"], "-P", ENV["MQTT_PASSWORD"]]
 
 def subscribe() -> None:
-    process = subprocess.Popen(mqtt_args("mosquitto_sub.exe") + ["-t", "air/v1/#", "-v", "-q", "1"], stdout=subprocess.PIPE, text=True, encoding="utf-8")
+    # Retained state is useful to MQTT clients, but it is not proof that a
+    # board is alive.  Ignore it at service startup so the Wi-Fi console never
+    # presents an old retained `offline` / state pair as current telemetry.
+    process = subprocess.Popen(mqtt_args("mosquitto_sub.exe") + ["-R", "-t", "air/v1/#", "-v", "-q", "1"], stdout=subprocess.PIPE, text=True, encoding="utf-8")
     assert process.stdout
     for line in process.stdout:
         try:
@@ -32,6 +35,7 @@ def subscribe() -> None:
             with LOCK:
                 record = DEVICES.setdefault(device_id, {"device_id": device_id})
                 record[category] = body
+                record["last_seen_ms"] = int(time.time() * 1000)
         except ValueError:
             continue
 
@@ -42,7 +46,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if urlparse(self.path).path == "/health": return self.reply(200, {"status": "ok", "runtime": "stdlib"})
         if urlparse(self.path).path == "/api/v1/devices":
-            with LOCK: return self.reply(200, list(DEVICES.values()))
+            with LOCK:
+                now = int(time.time() * 1000)
+                devices = []
+                for source in DEVICES.values():
+                    record = dict(source)
+                    age = now - record.get("last_seen_ms", 0)
+                    # The appliance sends a 2-second heartbeat.  A generous
+                    # 7-second grace window avoids UI flicker but makes an
+                    # actual broker/Wi-Fi loss visible promptly.
+                    record["last_seen_age_ms"] = age
+                    record["online"] = record.get("availability") == "online" and age <= 7000
+                    devices.append(record)
+                return self.reply(200, devices)
         return self.reply(404, {"error": "not found"})
     def do_POST(self) -> None:
         parts = urlparse(self.path).path.split("/")

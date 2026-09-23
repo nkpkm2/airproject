@@ -18,16 +18,16 @@
 - 设备只连接 2.4 GHz；控制端可以连接 5 GHz。两者只需处于同一 LAN/VLAN，且未启用访客隔离。
 - MQTT 是设备与控制端的唯一局域网消息总线。
 - 模式、开关、在线状态、命令回执立即上报；ADC 波形和详细诊断默认关闭、按需开启并自动过期。
-- Wi-Fi 只能由一个非阻塞状态机控制；禁止 SDK 自动重连、后台重连和手动连接同时争用射频。
+- Wi-Fi 只能由一个连接调度器控制；禁止 SDK 自动重连、后台重连和手动连接同时争用射频。
 - Wi-Fi 密码不进入源码。首次配置经串口或配网页写入板内 NVS，网页只可在本浏览器本地保存。
 
 详见 [系统架构](docs/architecture.md) 与 [MQTT 契约](docs/mqtt-contract.md)。
 
 ## 当前开发阶段
 
-主板固件已经具备 USB 串口、四路 ADC、两路光耦、手动 Wi-Fi 配置和基础诊断能力。控制端已经具备 MQTT Broker 编排、设备注册表、HTTP API 和 WebSocket 推送骨架。
+主板固件已经具备 USB 串口、四路 ADC、两路光耦、受控 Wi-Fi 重试、MQTT 在线状态、心跳、命令与回执，以及可过期的诊断流。控制端提供原生 Windows Mosquitto、设备注册表和 HTTP 调试 API。
 
-下一阶段是把主板的连接流程收敛为单一 Wi-Fi 状态机，并接入 MQTT 状态、命令和可过期的调试数据流。
+下一阶段是把当前有界连接调度器进一步拆分成完全非阻塞的 Wi-Fi 状态机，并加入净化器模式判定、配置持久化和历史记录。
 
 ## 本地启动
 
@@ -41,13 +41,13 @@ python -m http.server 8765 --directory console
 
 ### 局域网控制端
 
-需要 Docker。控制端尚未配置真实设备前，可以只启动 Broker 与 API 骨架：
+开发机直接使用原生 Mosquitto，不需要 Docker 或虚拟化。Broker 的私有账号配置放在被 Git 忽略的 `control-service/.env` 和 `control-service/mosquitto/passwords`。
 
 ```powershell
-cd control-service
-docker compose up -d
+& 'C:\Program Files\mosquitto\mosquitto.exe' -c .\control-service\mosquitto\mosquitto.windows.conf -v
+python .\control-service\dev_server.py
 ```
 
 服务 API 地址为 `http://localhost:8780`，Broker 为 `mqtt://<控制端局域网IP>:1883`。
 
-> `control-service/mosquitto/mosquitto.conf` 目前是仅限家庭内网的开发配置。正式部署前必须启用账户、访问控制和备份。
+`dev_server.py` 仅绑定 `127.0.0.1:8780`；浏览器调试页通过该本机 API 访问设备。Broker 为 `mqtt://<控制端局域网IP>:1883`，且必须配置家庭内网防火墙规则。

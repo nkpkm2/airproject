@@ -7,7 +7,10 @@
 *.log
 __pycache__/
 *.py[cod]
+.installers/
 control-service/mosquitto/data/
 control-service/mosquitto/log/
+control-service/mosquitto/passwords
 control-service/.env
+control-service/.venv/
 console/local-config.js

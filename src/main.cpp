@@ -1,11 +1,13 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <mqtt_client.h>
 #include <esp_chip_info.h>
 #include <esp_flash.h>
 #include <esp_system.h>
 
 #include "board_config.h"
+#include "device_identity.h"
 
 namespace {
 
@@ -17,6 +19,20 @@ constexpr uint32_t kAdcTestDurationMs = 10000;
 String commandBuffer;
 Preferences preferences;
 uint32_t lastWifiStatusMs = 0;
+uint32_t wifiRetryAtMs = 2000;
+uint8_t wifiRetryFailures = 0;
+uint32_t lastHeartbeatMs = 0;
+uint32_t lastMqttTelemetryMs = 0;
+esp_mqtt_client_handle_t mqttClient = nullptr;
+bool mqttOnline = false;
+bool telemetryEnabled = false;
+uint32_t telemetryExpiresAtMs = 0;
+String mqttUri;
+String mqttUser;
+String mqttPassword;
+String mqttClientId;
+String mqttAvailabilityTopic;
+String mqttCommandTopic;
 uint32_t lastAdcSampleUs = 0;
 uint32_t lastAdcFrameMs = 0;
 uint32_t adcMillivolts[kAdcChannelCount]{};
@@ -38,11 +54,71 @@ void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
   const auto reason = static_cast<wifi_err_reason_t>(info.wifi_sta_disconnected.reason);
   Serial.printf("WIFI_DISCONNECT reason=%u|%s\n",
                 static_cast<unsigned>(reason), WiFi.disconnectReasonName(reason));
+  // Reconnect is scheduled from loop(), never from the Wi-Fi event callback.
+  // This keeps the callback fast and prevents overlapping connection attempts.
+  if (!preferences.getString("ssid", "").isEmpty()) wifiRetryAtMs = millis() + 2000;
 }
 
 constexpr int kOptocouplerPins[] = {kPowerOptocouplerGpio, kModeOptocouplerGpio};
 constexpr const char* kOptocouplerLabels[] = {"power", "mode"};
 constexpr size_t kOptocouplerCount = sizeof(kOptocouplerPins) / sizeof(kOptocouplerPins[0]);
+void blinkLed(uint8_t count, uint16_t onMs, uint16_t offMs);
+void setOptocoupler(size_t index, bool active);
+void pulseOptocoupler(size_t index);
+
+String topicFor(const char* suffix) { return "air/v1/" + deviceId() + "/" + suffix; }
+void publishMqtt(const String& topic, const String& payload, int qos = 0, bool retain = false) {
+  if (mqttOnline && mqttClient) esp_mqtt_client_publish(mqttClient, topic.c_str(), payload.c_str(), payload.length(), qos, retain);
+}
+void publishAck(const String& requestId, const char* result) {
+  publishMqtt(topicFor("ack"), "{\"request_id\":\"" + requestId + "\",\"result\":\"" + result + "\"}", 1);
+}
+void publishState() {
+  if (!mqttOnline) return;
+  char body[256];
+  snprintf(body, sizeof(body), "{\"schema\":1,\"device_id\":\"%s\",\"powered\":false,\"mode\":\"unknown\",\"adc_mv\":[%lu,%lu,%lu,%lu],\"opto\":{\"power\":%s,\"mode\":%s},\"wifi\":{\"rssi_dbm\":%d,\"ip\":\"%s\"}}",
+           deviceId().c_str(), static_cast<unsigned long>(adcMillivolts[0]), static_cast<unsigned long>(adcMillivolts[1]), static_cast<unsigned long>(adcMillivolts[2]), static_cast<unsigned long>(adcMillivolts[3]), optocouplerActive[0] ? "true" : "false", optocouplerActive[1] ? "true" : "false", WiFi.RSSI(), WiFi.localIP().toString().c_str());
+  publishMqtt(topicFor("state"), body, 1, true);
+}
+String jsonStringField(const String& json, const char* name) {
+  const String key = "\"" + String(name) + "\"";
+  const int keyStart = json.indexOf(key);
+  if (keyStart < 0) return "";
+  const int colon = json.indexOf(':', keyStart + key.length());
+  if (colon < 0) return "";
+  const int valueStart = json.indexOf('"', colon + 1);
+  if (valueStart < 0) return "";
+  const int valueEnd = json.indexOf('"', valueStart + 1);
+  return valueEnd < 0 ? "" : json.substring(valueStart + 1, valueEnd);
+}
+void handleMqttCommand(const char* data, int length) {
+  String command(data, length);
+  const String requestId = jsonStringField(command, "request_id");
+  const String type = jsonStringField(command, "type");
+  if (type == "led.blink") { blinkLed(3, 200, 200); publishAck(requestId, "ok"); }
+  else if (type == "opto.power.on") { setOptocoupler(0, true); publishAck(requestId, "ok"); }
+  else if (type == "opto.power.off") { setOptocoupler(0, false); publishAck(requestId, "ok"); }
+  else if (type == "opto.mode.pulse") { pulseOptocoupler(1); publishAck(requestId, "ok"); }
+  else if (type == "debug.configure") { telemetryEnabled = command.indexOf("\"adc_stream_hz\":0") < 0; telemetryExpiresAtMs = millis() + 60000; publishAck(requestId, "ok"); }
+  else publishAck(requestId, "unsupported");
+}
+esp_err_t mqttEvent(esp_mqtt_event_handle_t event) {
+  if (event->event_id == MQTT_EVENT_CONNECTED) { mqttOnline = true; esp_mqtt_client_subscribe(event->client, mqttCommandTopic.c_str(), 1); publishMqtt(mqttAvailabilityTopic, "online", 1, true); publishState(); Serial.println("MQTT_STATE online"); }
+  else if (event->event_id == MQTT_EVENT_DISCONNECTED) { mqttOnline = false; Serial.println("MQTT_STATE offline"); }
+  else if (event->event_id == MQTT_EVENT_DATA && event->topic && String(event->topic, event->topic_len) == mqttCommandTopic) handleMqttCommand(event->data, event->data_len);
+  return ESP_OK;
+}
+void startMqttIfConfigured() {
+  if (mqttClient || WiFi.status() != WL_CONNECTED) return;
+  mqttUri = preferences.getString("mqtt-uri", ""); mqttUser = preferences.getString("mqtt-user", ""); mqttPassword = preferences.getString("mqtt-pass", "");
+  if (mqttUri.isEmpty()) return;
+  mqttAvailabilityTopic = topicFor("availability"); mqttCommandTopic = topicFor("command");
+  // esp-mqtt retains the client-id pointer. Do not point it at deviceId(),
+  // which returns a temporary String that vanishes at the end of this line.
+  mqttClientId = deviceId();
+  esp_mqtt_client_config_t config{}; config.uri = mqttUri.c_str(); config.client_id = mqttClientId.c_str(); config.username = mqttUser.c_str(); config.password = mqttPassword.c_str(); config.lwt_topic = mqttAvailabilityTopic.c_str(); config.lwt_msg = "offline"; config.lwt_qos = 1; config.lwt_retain = 1; config.keepalive = 10; config.disable_auto_reconnect = false; config.event_handle = mqttEvent;
+  mqttClient = esp_mqtt_client_init(&config); if (mqttClient) esp_mqtt_client_start(mqttClient);
+}
 
 void setLed(bool on) {
   const uint8_t level = (on != kBoardLedActiveLow) ? HIGH : LOW;
@@ -71,6 +147,7 @@ void setOptocoupler(size_t index, bool active) {
   const uint8_t level = (active == kOptocouplerActiveHigh) ? HIGH : LOW;
   digitalWrite(kOptocouplerPins[index], level);
   emitOptocouplerStatus();
+  publishState();
 }
 
 void pulseOptocoupler(size_t index) {
@@ -125,6 +202,7 @@ void printBoardInfo() {
   Serial.printf("Reset reason   : %s (%d)\n", resetReasonName(esp_reset_reason()),
                 static_cast<int>(esp_reset_reason()));
   Serial.printf("MAC address    : %s\n", WiFi.macAddress().c_str());
+  Serial.printf("Device ID      : %s\n", deviceId().c_str());
   Serial.printf("LED config     : GPIO%d, active %s\n", kBoardLedGpio,
                 kBoardLedActiveLow ? "LOW" : "HIGH");
   Serial.printf("Uptime         : %lu ms\n", static_cast<unsigned long>(millis()));
@@ -234,14 +312,7 @@ void finishAdcTestIfReady() {
   adcTestActive = false;
 }
 
-void connectWifi(const String& encodedCredentials) {
-  const int divider = encodedCredentials.indexOf('|');
-  if (divider < 1) {
-    Serial.println("[FAIL] Wi-Fi credentials format is invalid.");
-    return;
-  }
-  const String ssid = urlDecode(encodedCredentials.substring(0, divider));
-  const String password = urlDecode(encodedCredentials.substring(divider + 1));
+void connectWifiCredentials(const String& ssid, const String& password) {
   if (ssid.isEmpty()) {
     Serial.println("[FAIL] Wi-Fi SSID is empty.");
     return;
@@ -279,6 +350,14 @@ void connectWifi(const String& encodedCredentials) {
   }
   WiFi.scanDelete();
 
+  // Let the access point choose its own suitable BSSID first.  Pinning a
+  // BSSID is a useful fallback, but on consumer mesh/roaming networks it can
+  // turn a healthy SSID into repeated WPA handshake timeouts.
+  Serial.println("[TEST] Trying normal SSID roaming connection first.");
+  WiFi.begin(ssid.c_str(), password.c_str());
+  uint32_t started = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - started < 15000) delay(100);
+
   int connectedCandidate = -1;
   for (size_t i = 0; i < candidateCount && WiFi.status() != WL_CONNECTED; ++i) {
     const uint8_t* bssid = candidates[i].bssid;
@@ -288,13 +367,13 @@ void connectWifi(const String& encodedCredentials) {
                     bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5],
                     static_cast<long>(candidates[i].channel), static_cast<long>(candidates[i].rssi),
                     attempt, attempts);
-      WiFi.disconnect(true, false);
+      WiFi.disconnect(false, false);
       delay(250);
       WiFi.mode(WIFI_STA);
       WiFi.setSleep(false);
       WiFi.setTxPower(WIFI_POWER_19_5dBm);
       WiFi.begin(ssid.c_str(), password.c_str(), candidates[i].channel, candidates[i].bssid, true);
-      const uint32_t started = millis();
+      started = millis();
       while (WiFi.status() != WL_CONNECTED && millis() - started < 9000) delay(100);
       if (WiFi.status() == WL_CONNECTED) {
         connectedCandidate = static_cast<int>(i);
@@ -306,15 +385,15 @@ void connectWifi(const String& encodedCredentials) {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println(candidateCount == 0
-                       ? "[INFO] No scan match found; trying SSID-only connection."
-                       : "[INFO] BSSID attempts failed; trying SSID-only roaming connection.");
-    WiFi.disconnect(true, false);
+                       ? "[INFO] No scan match found; retrying SSID roaming connection."
+                       : "[INFO] BSSID attempts failed; retrying SSID roaming connection.");
+    WiFi.disconnect(false, false);
     delay(250);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     WiFi.setTxPower(WIFI_POWER_19_5dBm);
     WiFi.begin(ssid.c_str(), password.c_str());
-    const uint32_t started = millis();
+    started = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - started < 15000) delay(100);
   }
 
@@ -330,16 +409,46 @@ void connectWifi(const String& encodedCredentials) {
     }
     Serial.printf("[PASS] Wi-Fi connected. IP address: %s\n", WiFi.localIP().toString().c_str());
     emitWifiStatus();
+    startMqttIfConfigured();
+    wifiRetryFailures = 0;
+    wifiRetryAtMs = 0;
+    if (mqttOnline && millis() - lastHeartbeatMs >= 2000) { lastHeartbeatMs = millis(); publishMqtt(topicFor("heartbeat"), "{\"uptime_ms\":" + String(millis()) + ",\"rssi_dbm\":" + String(WiFi.RSSI()) + ",\"ip\":\"" + WiFi.localIP().toString() + "\"}"); }
     blinkLed(2, 80, 80);
   } else {
     Serial.printf("[FAIL] Wi-Fi connection failed (status %d). Credentials were not saved.\n", WiFi.status());
     WiFi.disconnect(false, false);
+    wifiRetryFailures = min<uint8_t>(wifiRetryFailures + 1, 6);
+    const uint32_t retryDelayMs = min<uint32_t>(60000, 3000UL << wifiRetryFailures);
+    wifiRetryAtMs = millis() + retryDelayMs;
+    Serial.printf("[INFO] Wi-Fi retry scheduled in %lu ms.\n", static_cast<unsigned long>(retryDelayMs));
   }
+}
+
+void connectWifi(const String& encodedCredentials) {
+  const int divider = encodedCredentials.indexOf('|');
+  if (divider < 1) {
+    Serial.println("[FAIL] Wi-Fi credentials format is invalid.");
+    return;
+  }
+  connectWifiCredentials(urlDecode(encodedCredentials.substring(0, divider)),
+                         urlDecode(encodedCredentials.substring(divider + 1)));
+}
+
+void connectSavedWifi() {
+  const String ssid = preferences.getString("ssid", "");
+  if (ssid.isEmpty()) return;
+  Serial.printf("[INFO] Retrying saved Wi-Fi network: %s\n", ssid.c_str());
+  connectWifiCredentials(ssid, preferences.getString("password", ""));
 }
 
 void forgetWifi() {
   WiFi.disconnect(true, true);
-  preferences.clear();
+  preferences.remove("ssid");
+  preferences.remove("password");
+  preferences.remove("bssid");
+  preferences.remove("channel");
+  wifiRetryAtMs = 0;
+  wifiRetryFailures = 0;
   Serial.println("[OK] Saved Wi-Fi credentials removed; Wi-Fi disconnected.");
 }
 
@@ -353,6 +462,7 @@ void printHelp() {
   Serial.println("  blink   - blink the configured onboard LED three times");
   Serial.println("  wifi <url-encoded-ssid>|<url-encoded-password> - connect and save Wi-Fi");
   Serial.println("  wifi forget - disconnect and remove saved Wi-Fi credentials");
+  Serial.println("  mqtt <uri>|<user>|<password> - save and start local MQTT");
   Serial.println("  adc test - measure 5 ms ADC sampling and 20 ms serial-frame rate for 10 seconds");
   Serial.println("  opto <power|mode> <on|off|pulse> - test the respective optocoupler; pulse is 300 ms");
   Serial.println("  reboot  - restart the board");
@@ -371,6 +481,7 @@ void runCommand(String command) {
   else if (normalized == "led off") { setLed(false); Serial.println("[OK] LED off"); }
   else if (normalized == "blink") { blinkLed(3, 200, 200); Serial.println("[OK] Blink complete"); }
   else if (normalized == "wifi forget") forgetWifi();
+  else if (normalized.startsWith("mqtt ")) { String value = command.substring(5); int a = value.indexOf('|'), b = value.indexOf('|', a + 1); if (a > 0 && b > a) { preferences.putString("mqtt-uri", value.substring(0,a)); preferences.putString("mqtt-user", value.substring(a+1,b)); preferences.putString("mqtt-pass", value.substring(b+1)); startMqttIfConfigured(); Serial.println("[OK] MQTT configuration saved."); } else Serial.println("[FAIL] MQTT format is uri|user|password."); }
   else if (normalized.startsWith("wifi ")) connectWifi(command.substring(5));
   else if (normalized == "adc test") startAdcTest();
   else if (normalized == "opto power on") setOptocoupler(0, true);
@@ -411,6 +522,9 @@ void setup() {
   Serial.println("[PASS] Firmware booted and USB serial is responding.");
   blinkLed(3, 120, 120);
   scanWifi();
+  if (!preferences.getString("ssid", "").isEmpty()) {
+    Serial.println("[INFO] Saved Wi-Fi will connect automatically in the background.");
+  }
   printHelp();
   Serial.println("Board check ready. Type a command and press Enter.");
 }
@@ -431,6 +545,13 @@ void loop() {
     lastWifiStatusMs = millis();
     emitWifiStatus();
   }
+  if (WiFi.status() != WL_CONNECTED && wifiRetryAtMs != 0 &&
+      static_cast<int32_t>(millis() - wifiRetryAtMs) >= 0) {
+    // The existing AP selection routine performs a bounded scan and has a
+    // bounded per-BSSID timeout; this scheduler supplies retry/backoff policy.
+    wifiRetryAtMs = 0;
+    connectSavedWifi();
+  }
   const uint32_t nowUs = micros();
   if (nowUs - lastAdcSampleUs >= kAdcSampleIntervalUs) {
     lastAdcSampleUs = nowUs;
@@ -440,6 +561,8 @@ void loop() {
     lastAdcFrameMs = millis();
     emitAdcFrame();
   }
+  if (telemetryEnabled && mqttOnline && millis() - lastMqttTelemetryMs >= 50) { lastMqttTelemetryMs = millis(); publishMqtt(topicFor("telemetry"), "{\"adc_mv\":[" + String(adcMillivolts[0]) + "," + String(adcMillivolts[1]) + "," + String(adcMillivolts[2]) + "," + String(adcMillivolts[3]) + "]}"); }
+  if (telemetryEnabled && static_cast<int32_t>(millis() - telemetryExpiresAtMs) >= 0) telemetryEnabled = false;
   finishAdcTestIfReady();
   updateOptocouplerPulses();
   delay(0);

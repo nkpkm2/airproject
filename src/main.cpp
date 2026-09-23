@@ -41,7 +41,7 @@ uint32_t wifiPhaseStartedMs = 0;
 String wifiTargetSsid;
 String wifiTargetPassword;
 uint32_t lastHeartbeatMs = 0;
-uint32_t lastMqttTelemetryMs = 0;
+uint32_t lastMqttTelemetryUs = 0;
 uint32_t lastStatusLedMs = 0;
 bool statusLedOn = false;
 uint8_t ledPatternEdgesRemaining = 0;
@@ -49,7 +49,9 @@ bool ledPatternOn = false;
 uint16_t ledPatternOnMs = 100;
 uint16_t ledPatternOffMs = 100;
 uint32_t ledPatternNextMs = 0;
-uint32_t telemetryIntervalMs = 100;
+uint32_t telemetryIntervalUs = 100000;
+uint32_t telemetrySequence = 0;
+uint32_t remoteRebootAtMs = 0;
 esp_mqtt_client_handle_t mqttClient = nullptr;
 bool mqttOnline = false;
 volatile uint32_t mqttRecoveryAtMs = 0;
@@ -162,11 +164,19 @@ void handleMqttCommand(const char* data, int length) {
   else if (type == "opto.power.on") { setOptocoupler(0, true); publishAck(requestId, "ok"); }
   else if (type == "opto.power.off") { setOptocoupler(0, false); publishAck(requestId, "ok"); }
   else if (type == "opto.mode.pulse") { pulseOptocoupler(1); publishAck(requestId, "ok"); }
+  else if (type == "device.reboot") {
+    // Give the QoS 1 acknowledgement enough time to leave the MQTT outbox
+    // before restarting. The UI can therefore distinguish an accepted reboot
+    // from a command that was never received.
+    publishAck(requestId, "ok");
+    remoteRebootAtMs = millis() + 1500;
+  }
   else if (type == "debug.configure") {
-    const int requestedHz = constrain(jsonIntField(command, "adc_stream_hz", 0), 0, 20);
+    const int requestedHz = constrain(jsonIntField(command, "adc_stream_hz", 0), 0, 120);
     const int requestedDuration = constrain(jsonIntField(command, "expires_in_s", 60), 1, 600);
     telemetryEnabled = requestedHz > 0;
-    telemetryIntervalMs = requestedHz ? 1000 / requestedHz : 1000;
+    telemetryIntervalUs = requestedHz ? 1000000UL / static_cast<uint32_t>(requestedHz) : 1000000UL;
+    telemetrySequence = 0;
     telemetryExpiresAtMs = millis() + static_cast<uint32_t>(requestedDuration) * 1000UL;
     publishDiagnostic(telemetryEnabled ? "remote diagnostics enabled" : "remote diagnostics disabled");
     publishAck(requestId, "ok");
@@ -445,8 +455,11 @@ void scheduleWifiBackoff() {
   // exponential wait made a software reset appear stuck after a single miss.
   WiFi.disconnect(false, false);
   wifiBssidRecovery = false;
-  wifiRetryFailures = min<uint8_t>(wifiRetryFailures + 1, 4);
-  const uint32_t retryDelayMs = min<uint32_t>(12000, 1000UL << wifiRetryFailures);
+  wifiRetryFailures = min<uint8_t>(wifiRetryFailures + 1, 3);
+  // 2 s, 4 s, then a 6 s ceiling. This remains polite to the AP while making
+  // recovery from a weak-signal AUTH_EXPIRE visibly faster than the former
+  // 12-second ceiling.
+  const uint32_t retryDelayMs = min<uint32_t>(6000, 1000UL << wifiRetryFailures);
   wifiRetryAtMs = millis() + retryDelayMs;
   wifiPhase = WifiPhase::Backoff;
   Serial.printf("[INFO] Wi-Fi retry %u scheduled in %lu ms.\n",
@@ -758,11 +771,17 @@ void loop() {
     Serial.println("[INFO] MQTT watchdog rebuilding offline client.");
     rebuildMqttClient();
   }
-  if (telemetryEnabled && mqttOnline && millis() - lastMqttTelemetryMs >= telemetryIntervalMs) {
-    lastMqttTelemetryMs = millis();
-    publishMqtt(topicFor("telemetry"), "{\"uptime_ms\":" + String(millis()) + ",\"adc_mv\":[" + String(adcMillivolts[0]) + "," + String(adcMillivolts[1]) + "," + String(adcMillivolts[2]) + "," + String(adcMillivolts[3]) + "],\"opto\":{\"power\":" + String(optocouplerActive[0] ? "true" : "false") + ",\"mode\":" + String(optocouplerActive[1] ? "true" : "false") + "}}");
+  if (telemetryEnabled && mqttOnline && nowUs - lastMqttTelemetryUs >= telemetryIntervalUs) {
+    lastMqttTelemetryUs = nowUs;
+    publishMqtt(topicFor("telemetry"), "{\"seq\":" + String(telemetrySequence++) + ",\"uptime_ms\":" + String(millis()) + ",\"adc_mv\":[" + String(adcMillivolts[0]) + "," + String(adcMillivolts[1]) + "," + String(adcMillivolts[2]) + "," + String(adcMillivolts[3]) + "],\"opto\":{\"power\":" + String(optocouplerActive[0] ? "true" : "false") + ",\"mode\":" + String(optocouplerActive[1] ? "true" : "false") + "}}");
   }
   if (telemetryEnabled && static_cast<int32_t>(millis() - telemetryExpiresAtMs) >= 0) { telemetryEnabled = false; publishDiagnostic("remote diagnostics expired"); }
+  if (remoteRebootAtMs && static_cast<int32_t>(millis() - remoteRebootAtMs) >= 0) {
+    remoteRebootAtMs = 0;
+    Serial.println("[INFO] Remote reboot accepted; restarting now.");
+    Serial.flush();
+    ESP.restart();
+  }
   finishAdcTestIfReady();
   updateOptocouplerPulses();
   tickStatusLed();

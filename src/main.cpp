@@ -443,9 +443,12 @@ void connectWifiCredentials(const String& ssid, const String& password) {
   WiFi.persistent(false);
   WiFi.setSleep(false);
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
-  Serial.printf("[TEST] Queued Wi-Fi connection to: %s\n", ssid.c_str());
-  WiFi.scanNetworks(true, true);
-  wifiPhase = WifiPhase::Scanning;
+  // One fixed household network: begin association directly. Scanning and
+  // BSSID pinning were useful during installation, but can cause a needless
+  // driver race and are not part of normal appliance operation.
+  Serial.printf("[TEST] Starting fixed Wi-Fi association: %s\n", ssid.c_str());
+  WiFi.begin(wifiTargetSsid.c_str(), wifiTargetPassword.c_str());
+  wifiPhase = WifiPhase::Roaming;
   wifiPhaseStartedMs = millis();
 }
 
@@ -491,8 +494,8 @@ void tickWifiConnection() {
     return;
   }
   if (wifiPhase == WifiPhase::Roaming && millis() - wifiPhaseStartedMs >= 15000) {
-    wifiCandidateIndex = 0;
-    beginBssidFallback();
+    Serial.println("[INFO] Fixed-network association timed out.");
+    scheduleWifiBackoff();
     return;
   }
   if (wifiPhase == WifiPhase::BssidFallback && millis() - wifiPhaseStartedMs >= 9000) {

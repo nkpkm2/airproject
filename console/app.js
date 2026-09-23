@@ -6,10 +6,12 @@ const saved = JSON.parse(localStorage.getItem('purifier-console-device') || '{}'
 adcKeys.forEach((key) => { ui.adc[key] = { history: Array(140).fill(0), hasSample: false }; });
 ['alias', 'purifier', 'room'].forEach((key) => { if (saved[key]) $(`${key}-input`).value = saved[key]; });
 refreshIdentity();
+setSerialControls(false);
 
 function toast(message) { const node = $('toast'); node.textContent = message; node.classList.add('visible'); clearTimeout(toast.timer); toast.timer = setTimeout(() => node.classList.remove('visible'), 3200); }
 function refreshIdentity() { const alias = $('alias-input').value || '未命名设备'; $('device-title').textContent = alias; $('side-name').textContent = alias; $('side-room').textContent = `${$('room-input').value || '未分配房间'} · ${ui.connected ? 'USB 已连接' : '未联网'}`; }
-function setConnection(connected) { ui.connected = connected; $('connection-dot').className = `dot ${connected ? 'neutral' : 'offline'}`; $('connection-text').textContent = connected ? 'USB 串口已连接' : '未连接 USB 串口'; $('connect-button').textContent = connected ? '断开串口' : '连接 USB 串口'; refreshIdentity(); }
+function setSerialControls(connected) { document.querySelectorAll('#info-button,#blink-button,#reboot-button,#adc-test-button,[data-opto-command],#save-button').forEach(button => { button.disabled = !connected; }); }
+function setConnection(connected) { ui.connected = connected; $('connection-dot').className = `dot ${connected ? 'neutral' : 'offline'}`; $('connection-text').textContent = connected ? 'USB 串口已连接' : '未连接 USB 串口'; $('connect-button').textContent = connected ? '断开串口' : '连接 USB 串口'; setSerialControls(connected); refreshIdentity(); }
 function send(command) { if (!ui.writer) { toast('请先连接 USB 串口'); return false; } ui.writer.write(new TextEncoder().encode(`${command}\n`)); return true; }
 function formatDuration(seconds) { if (seconds < 60) return `${seconds} 秒`; const minutes = Math.floor(seconds / 60), remainder = seconds % 60; return remainder ? `${minutes} 分 ${remainder} 秒` : `${minutes} 分`; }
 function refreshWifiDuration() { if (ui.wifiConnectedAt === null) return; $('wifi-status').textContent = `已连接 ${formatDuration(Math.floor((Date.now() - ui.wifiConnectedAt) / 1000))}`; }

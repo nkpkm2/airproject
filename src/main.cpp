@@ -8,6 +8,7 @@
 
 #include "board_config.h"
 #include "device_identity.h"
+#include "private_config.h"
 
 namespace {
 
@@ -184,7 +185,7 @@ void blinkLed(uint8_t count, uint16_t onMs = 100, uint16_t offMs = 100) {
 
 void tickStatusLed() {
   static bool fastBlinkOn = false;
-  const bool connecting = !preferences.getString("ssid", "").isEmpty();
+  const bool connecting = kFixedWifiSsid[0] != '\0';
   if (!connecting) { if (fastBlinkOn) { fastBlinkOn = false; setLed(false); } return; }
   // Slow blue blink = scanning / associating. Fast blue blink = Wi-Fi ready.
   // The LED deliberately does not encode purifier mode.
@@ -322,6 +323,22 @@ void emitWifiStatus() {
 
 void emitWifiState() {
   Serial.printf("WIFI_STATE %d|%s\n", static_cast<int>(WiFi.status()), WiFi.SSID().c_str());
+}
+
+const char* wifiPhaseName() {
+  switch (wifiPhase) {
+    case WifiPhase::Idle: return "waiting";
+    case WifiPhase::Scanning: return "scanning";
+    case WifiPhase::Roaming: return "associating";
+    case WifiPhase::BssidFallback: return "associating-fallback";
+    case WifiPhase::Backoff: return "retry-wait";
+    case WifiPhase::Online: return "online";
+  }
+  return "unknown";
+}
+void emitWifiProgress() {
+  const String ssid = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : String(kFixedWifiSsid);
+  Serial.printf("WIFI_PROGRESS %s|%s\n", wifiPhaseName(), ssid.c_str());
 }
 
 void sampleAdcs() {
@@ -495,33 +512,30 @@ void connectWifi(const String& encodedCredentials) {
 }
 
 void connectSavedWifi() {
-  const String ssid = preferences.getString("ssid", "");
-  if (ssid.isEmpty()) return;
-  Serial.printf("[INFO] Retrying saved Wi-Fi network: %s\n", ssid.c_str());
-  connectWifiCredentials(ssid, preferences.getString("password", ""));
+  Serial.printf("[INFO] Retrying fixed Wi-Fi network: %s\n", kFixedWifiSsid);
+  connectWifiCredentials(kFixedWifiSsid, kFixedWifiPassword);
 }
 
 void forgetWifi() {
   WiFi.disconnect(true, true);
-  preferences.remove("ssid");
-  preferences.remove("password");
+  // The production board has one fixed firmware network, so this is only a
+  // temporary disconnect; the reconnect state machine resumes automatically.
   preferences.remove("bssid");
   preferences.remove("channel");
   wifiRetryAtMs = 0;
   wifiRetryFailures = 0;
-  Serial.println("[OK] Saved Wi-Fi credentials removed; Wi-Fi disconnected.");
+  Serial.println("[OK] Wi-Fi disconnected; fixed-network retry remains enabled.");
 }
 
 void printHelp() {
   Serial.println("Commands:");
   Serial.println("  help    - show this list");
   Serial.println("  info    - print chip, flash, memory and reset information");
-  Serial.println("  scan    - scan nearby Wi-Fi networks (no password needed)");
+  Serial.println("  scan    - diagnostic-only scan; normal Wi-Fi is automatic");
   Serial.println("  led on  - turn the configured onboard LED on");
   Serial.println("  led off - turn the configured onboard LED off");
   Serial.println("  blink   - blink the configured onboard LED three times");
-  Serial.println("  wifi <url-encoded-ssid>|<url-encoded-password> - connect and save Wi-Fi");
-  Serial.println("  wifi forget - disconnect and remove saved Wi-Fi credentials");
+  Serial.println("  Wi-Fi is fixed in private_config.h and connects automatically at boot");
   Serial.println("  mqtt <uri>|<user>|<password> - save and start local MQTT");
   Serial.println("  adc test - measure 5 ms ADC sampling and 20 ms serial-frame rate for 10 seconds");
   Serial.println("  opto <power|mode> <on|off|pulse> - test the respective optocoupler; pulse is 300 ms");
@@ -535,14 +549,14 @@ void runCommand(String command) {
   normalized.toLowerCase();
 
   if (normalized == "help") printHelp();
-  else if (normalized == "info") { printBoardInfo(); emitOptocouplerStatus(); }
+  else if (normalized == "info") { printBoardInfo(); emitOptocouplerStatus(); emitWifiState(); emitWifiProgress(); }
   else if (normalized == "scan") scanWifi();
   else if (normalized == "led on") { setLed(true); Serial.println("[OK] LED on"); }
   else if (normalized == "led off") { setLed(false); Serial.println("[OK] LED off"); }
   else if (normalized == "blink") { blinkLed(3, 200, 200); Serial.println("[OK] Blink complete"); }
   else if (normalized == "wifi forget") forgetWifi();
   else if (normalized.startsWith("mqtt ")) { String value = command.substring(5); int a = value.indexOf('|'), b = value.indexOf('|', a + 1); if (a > 0 && b > a) { preferences.putString("mqtt-uri", value.substring(0,a)); preferences.putString("mqtt-user", value.substring(a+1,b)); preferences.putString("mqtt-pass", value.substring(b+1)); startMqttIfConfigured(); Serial.println("[OK] MQTT configuration saved."); } else Serial.println("[FAIL] MQTT format is uri|user|password."); }
-  else if (normalized.startsWith("wifi ")) connectWifi(command.substring(5));
+  else if (normalized.startsWith("wifi ")) Serial.println("[INFO] Wi-Fi is fixed in firmware; manual network changes are disabled.");
   else if (normalized == "adc test") startAdcTest();
   else if (normalized == "opto power on") setOptocoupler(0, true);
   else if (normalized == "opto power off") setOptocoupler(0, false);
@@ -582,9 +596,7 @@ void setup() {
   printBoardInfo();
   Serial.println("[PASS] Firmware booted and USB serial is responding.");
   blinkLed(3, 120, 120);
-  if (!preferences.getString("ssid", "").isEmpty()) {
-    Serial.println("[INFO] Saved Wi-Fi will connect automatically in the background.");
-  }
+  Serial.printf("[INFO] Fixed Wi-Fi %s will connect automatically in the background.\n", kFixedWifiSsid);
   printHelp();
   Serial.println("Board check ready. Type a command and press Enter.");
 }

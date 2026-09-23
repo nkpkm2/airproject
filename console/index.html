@@ -24,7 +24,7 @@
     </aside>
 
     <section class="workspace">
-      <div class="title-row"><div><p class="eyebrow">当前设备</p><h1 id="device-title">C3-测试板-01</h1><p id="device-subtitle">ESP32-C3 Super Mini · USB 直连</p></div><div class="actions"><button id="info-button">读取信息</button><button id="scan-button">扫描 Wi‑Fi</button><button id="blink-button">闪烁 LED</button><button id="reboot-button" class="danger">重启</button></div></div>
+      <div class="title-row"><div><p class="eyebrow">当前设备</p><h1 id="device-title">C3-测试板-01</h1><p id="device-subtitle">ESP32-C3 Super Mini · USB 直连</p></div><div class="actions"><button id="info-button">读取信息</button><button id="blink-button">闪烁 LED</button><button id="reboot-button" class="danger">重启</button></div></div>
 
       <section class="identity-panel panel">
         <div class="panel-heading"><h2>设备身份与部署</h2><span class="tag">可编辑</span></div>
@@ -41,11 +41,10 @@
 
       <div class="overview-grid">
         <section class="panel wifi-panel">
-          <div class="panel-heading"><h2>Wi‑Fi 连接</h2><span id="wifi-status" class="tag muted">扫描待命</span></div>
-          <div class="wifi-main"><div class="signal-visual" aria-label="Wi-Fi 信号强度"><i></i><i></i><i></i><i></i><i></i></div><div><strong id="wifi-name">未连接到 WLAN</strong><p id="wifi-detail">连接 USB 后点击“扫描 Wi‑Fi”</p></div><div class="rssi"><strong id="rssi-value">—</strong><span>dBm</span></div></div>
-          <div class="wifi-config"><label>要连接的 Wi‑Fi<input id="wifi-ssid-input" autocomplete="username" placeholder="扫描后可点选，或手动填写隐藏网络"></label><label>密码<input id="wifi-password-input" type="text" autocomplete="off" placeholder="首次输入后仅保存在此浏览器"></label><button id="wifi-connect-button" class="primary">连接并保存</button><button id="wifi-forget-button">断开并清除</button></div>
+          <div class="panel-heading"><h2>Wi‑Fi 连接</h2><span id="wifi-status" class="tag muted">正在自动连接…</span></div>
+          <div class="wifi-main"><div class="signal-visual" aria-label="Wi-Fi 信号强度"><i></i><i></i><i></i><i></i><i></i></div><div><strong id="wifi-name">固定家庭网络</strong><p id="wifi-detail">固件上电后自动扫描并连接；无需点击或输入密码。</p></div><div class="rssi"><strong id="rssi-value">—</strong><span>dBm</span></div></div>
           <div class="meter-wrap"><div class="meter-label"><span>信号强度</span><span id="signal-label">无数据</span></div><div class="linear-meter wifi-meter"><span id="wifi-fill"></span></div><div class="meter-scale"><span>-95</span><span>-75</span><span>-55</span><span>-35 dBm</span></div></div>
-          <details><summary>扫描到的网络 <span id="network-count">0</span></summary><ul id="network-list"><li>等待扫描结果</li></ul></details>
+          <p class="help">蓝灯慢闪：正在扫描或认证；蓝灯快闪：已连接 Wi‑Fi。SSID 与密码为该私有板卡的固定固件配置。</p>
         </section>
         <section class="panel health-panel">
           <div class="panel-heading"><h2>核心状态</h2><span class="tag good">通过</span></div>
@@ -75,7 +74,6 @@
     </section>
   </main>
   <div id="toast" role="status"></div>
-  <script src="local-config.js" onerror="void 0"></script>
   <script src="app.js"></script>
 </body>
 </html>

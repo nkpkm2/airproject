@@ -14,3 +14,4 @@ control-service/mosquitto/passwords
 control-service/.env
 control-service/.venv/
 console/local-config.js
+include/private_config.h

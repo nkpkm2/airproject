@@ -33,7 +33,7 @@ console/（浏览器）
 
 ## Wi-Fi 所有权规则
 
-每块设备只有一个连接调度器可以调用 `WiFi.begin`、`WiFi.disconnect` 或开始扫描。当前固件使用有界尝试与退避；其 API 边界已为完全非阻塞状态机预留：
+每块设备只有一个连接调度器可以调用 `WiFi.begin`、`WiFi.disconnect` 或开始扫描。当前固件使用真正的事件驱动状态机：
 
 ```text
 Disabled → Scanning → Associating → DHCP → Online
@@ -43,6 +43,7 @@ Disabled → Scanning → Associating → DHCP → Online
 
 - 上电后从 NVS 读取已配置的网络并开始受控连接。
 - 不使用 SDK 自动重连；重试只能由 `WifiManager` 执行，并采用退避时间。
+- 联网扫描、漫游关联、BSSID 降级尝试与退避均在 `loop()` 中分步推进；ADC、串口和 MQTT 不会因某次关联而停止。
 - 手动连接、重新配置和扫描均由同一调度器串行执行，不能并发操作射频。
 - Wi-Fi 密码只保存到设备 NVS 或本地服务配置，绝不写入 Git 可提交源码。
 

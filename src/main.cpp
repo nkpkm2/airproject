@@ -21,6 +21,19 @@ Preferences preferences;
 uint32_t lastWifiStatusMs = 0;
 uint32_t wifiRetryAtMs = 2000;
 uint8_t wifiRetryFailures = 0;
+struct WifiCandidate {
+  uint8_t bssid[6];
+  int32_t rssi;
+  int32_t channel;
+};
+enum class WifiPhase : uint8_t { Idle, Scanning, Roaming, BssidFallback, Backoff, Online };
+WifiPhase wifiPhase = WifiPhase::Idle;
+WifiCandidate wifiCandidates[4]{};
+size_t wifiCandidateCount = 0;
+size_t wifiCandidateIndex = 0;
+uint32_t wifiPhaseStartedMs = 0;
+String wifiTargetSsid;
+String wifiTargetPassword;
 uint32_t lastHeartbeatMs = 0;
 uint32_t lastMqttTelemetryMs = 0;
 esp_mqtt_client_handle_t mqttClient = nullptr;
@@ -56,7 +69,10 @@ void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
                 static_cast<unsigned>(reason), WiFi.disconnectReasonName(reason));
   // Reconnect is scheduled from loop(), never from the Wi-Fi event callback.
   // This keeps the callback fast and prevents overlapping connection attempts.
-  if (!preferences.getString("ssid", "").isEmpty()) wifiRetryAtMs = millis() + 2000;
+  if (wifiPhase == WifiPhase::Online && !preferences.getString("ssid", "").isEmpty()) {
+    wifiPhase = WifiPhase::Backoff;
+    wifiRetryAtMs = millis() + 2000;
+  }
 }
 
 constexpr int kOptocouplerPins[] = {kPowerOptocouplerGpio, kModeOptocouplerGpio};
@@ -65,6 +81,7 @@ constexpr size_t kOptocouplerCount = sizeof(kOptocouplerPins) / sizeof(kOptocoup
 void blinkLed(uint8_t count, uint16_t onMs, uint16_t offMs);
 void setOptocoupler(size_t index, bool active);
 void pulseOptocoupler(size_t index);
+void connectSavedWifi();
 
 String topicFor(const char* suffix) { return "air/v1/" + deviceId() + "/" + suffix; }
 void publishMqtt(const String& topic, const String& payload, int qos = 0, bool retain = false) {
@@ -312,115 +329,96 @@ void finishAdcTestIfReady() {
   adcTestActive = false;
 }
 
-void connectWifiCredentials(const String& ssid, const String& password) {
-  if (ssid.isEmpty()) {
-    Serial.println("[FAIL] Wi-Fi SSID is empty.");
-    return;
-  }
+void scheduleWifiBackoff() {
+  WiFi.disconnect(false, false);
+  wifiRetryFailures = min<uint8_t>(wifiRetryFailures + 1, 6);
+  const uint32_t retryDelayMs = min<uint32_t>(60000, 3000UL << wifiRetryFailures);
+  wifiRetryAtMs = millis() + retryDelayMs;
+  wifiPhase = WifiPhase::Backoff;
+  Serial.printf("[INFO] Wi-Fi retry scheduled in %lu ms.\n", static_cast<unsigned long>(retryDelayMs));
+}
 
-  Serial.printf("[TEST] Connecting to Wi-Fi SSID: %s\n", ssid.c_str());
-  // Start from a clean SDK station state. Our credentials live in Preferences,
-  // so erasing the Arduino Wi-Fi driver's cached AP does not lose user data.
-  WiFi.disconnect(true, true);
-  WiFi.mode(WIFI_OFF);
-  delay(500);
+void beginBssidFallback() {
+  if (wifiCandidateIndex >= wifiCandidateCount) { scheduleWifiBackoff(); return; }
+  const WifiCandidate& candidate = wifiCandidates[wifiCandidateIndex];
+  Serial.printf("[TEST] Trying BSSID %02X:%02X:%02X:%02X:%02X:%02X, channel %ld, RSSI %ld dBm.\n",
+                candidate.bssid[0], candidate.bssid[1], candidate.bssid[2], candidate.bssid[3],
+                candidate.bssid[4], candidate.bssid[5], static_cast<long>(candidate.channel),
+                static_cast<long>(candidate.rssi));
+  WiFi.disconnect(false, false);
+  WiFi.begin(wifiTargetSsid.c_str(), wifiTargetPassword.c_str(), candidate.channel, candidate.bssid, true);
+  wifiPhase = WifiPhase::BssidFallback;
+  wifiPhaseStartedMs = millis();
+}
+
+void completeWifiConnection() {
+  preferences.putString("ssid", wifiTargetSsid);
+  preferences.putString("password", wifiTargetPassword);
+  wifiRetryFailures = 0;
+  wifiRetryAtMs = 0;
+  wifiPhase = WifiPhase::Online;
+  Serial.printf("[PASS] Wi-Fi connected. IP address: %s\n", WiFi.localIP().toString().c_str());
+  emitWifiStatus();
+  startMqttIfConfigured();
+  blinkLed(2, 80, 80);
+}
+
+void connectWifiCredentials(const String& ssid, const String& password) {
+  if (ssid.isEmpty()) { Serial.println("[FAIL] Wi-Fi SSID is empty."); return; }
+  wifiTargetSsid = ssid;
+  wifiTargetPassword = password;
+  wifiCandidateCount = 0;
+  wifiCandidateIndex = 0;
+  WiFi.disconnect(false, false);
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(false);
   WiFi.persistent(false);
   WiFi.setSleep(false);
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  Serial.printf("[TEST] Queued Wi-Fi connection to: %s\n", ssid.c_str());
+  WiFi.scanNetworks(true, true);
+  wifiPhase = WifiPhase::Scanning;
+  wifiPhaseStartedMs = millis();
+}
 
-  struct WifiCandidate {
-    uint8_t bssid[6];
-    int32_t rssi;
-    int32_t channel;
-  };
-  WifiCandidate candidates[4]{};
-  size_t candidateCount = 0;
-  const int networkCount = WiFi.scanNetworks(false, true);
-  for (int i = 0; i < networkCount && candidateCount < 4; ++i) {
-    if (WiFi.SSID(i) != ssid) continue;
-    // Extremely weak mesh nodes add long timeouts and are not useful for a
-    // dependable appliance connection; the SSID-only fallback can still roam.
-    if (WiFi.RSSI(i) < -82) continue;
-    memcpy(candidates[candidateCount].bssid, WiFi.BSSID(i), 6);
-    candidates[candidateCount].rssi = WiFi.RSSI(i);
-    candidates[candidateCount].channel = WiFi.channel(i);
-    ++candidateCount;
+void tickWifiConnection() {
+  if ((wifiPhase == WifiPhase::Roaming || wifiPhase == WifiPhase::BssidFallback) &&
+      WiFi.status() == WL_CONNECTED) { completeWifiConnection(); return; }
+  if (wifiPhase == WifiPhase::Online && WiFi.status() != WL_CONNECTED) {
+    wifiPhase = WifiPhase::Backoff;
+    wifiRetryAtMs = millis() + 2000;
+    return;
   }
-  WiFi.scanDelete();
-
-  // Let the access point choose its own suitable BSSID first.  Pinning a
-  // BSSID is a useful fallback, but on consumer mesh/roaming networks it can
-  // turn a healthy SSID into repeated WPA handshake timeouts.
-  Serial.println("[TEST] Trying normal SSID roaming connection first.");
-  WiFi.begin(ssid.c_str(), password.c_str());
-  uint32_t started = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - started < 15000) delay(100);
-
-  int connectedCandidate = -1;
-  for (size_t i = 0; i < candidateCount && WiFi.status() != WL_CONNECTED; ++i) {
-    const uint8_t* bssid = candidates[i].bssid;
-    const uint8_t attempts = i == 0 ? 2 : 1;
-    for (uint8_t attempt = 1; attempt <= attempts && WiFi.status() != WL_CONNECTED; ++attempt) {
-      Serial.printf("[TEST] Trying BSSID %02X:%02X:%02X:%02X:%02X:%02X, channel %ld, RSSI %ld dBm (attempt %u/%u)\n",
-                    bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5],
-                    static_cast<long>(candidates[i].channel), static_cast<long>(candidates[i].rssi),
-                    attempt, attempts);
-      WiFi.disconnect(false, false);
-      delay(250);
-      WiFi.mode(WIFI_STA);
-      WiFi.setSleep(false);
-      WiFi.setTxPower(WIFI_POWER_19_5dBm);
-      WiFi.begin(ssid.c_str(), password.c_str(), candidates[i].channel, candidates[i].bssid, true);
-      started = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - started < 9000) delay(100);
-      if (WiFi.status() == WL_CONNECTED) {
-        connectedCandidate = static_cast<int>(i);
-        break;
-      }
-      Serial.printf("[INFO] BSSID attempt failed (status %d).\n", WiFi.status());
+  if (wifiPhase == WifiPhase::Backoff && static_cast<int32_t>(millis() - wifiRetryAtMs) >= 0) {
+    connectSavedWifi();
+    return;
+  }
+  if (wifiPhase == WifiPhase::Scanning) {
+    const int count = WiFi.scanComplete();
+    if (count == WIFI_SCAN_RUNNING) return;
+    if (count < 0) { Serial.printf("[FAIL] Wi-Fi scan error: %d\n", count); scheduleWifiBackoff(); return; }
+    for (int i = 0; i < count && wifiCandidateCount < 4; ++i) {
+      if (WiFi.SSID(i) != wifiTargetSsid || WiFi.RSSI(i) < -82) continue;
+      memcpy(wifiCandidates[wifiCandidateCount].bssid, WiFi.BSSID(i), 6);
+      wifiCandidates[wifiCandidateCount].rssi = WiFi.RSSI(i);
+      wifiCandidates[wifiCandidateCount].channel = WiFi.channel(i);
+      ++wifiCandidateCount;
     }
+    WiFi.scanDelete();
+    Serial.printf("[INFO] Scan found %u candidate(s); trying normal SSID roaming connection.\n", static_cast<unsigned>(wifiCandidateCount));
+    WiFi.begin(wifiTargetSsid.c_str(), wifiTargetPassword.c_str());
+    wifiPhase = WifiPhase::Roaming;
+    wifiPhaseStartedMs = millis();
+    return;
   }
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println(candidateCount == 0
-                       ? "[INFO] No scan match found; retrying SSID roaming connection."
-                       : "[INFO] BSSID attempts failed; retrying SSID roaming connection.");
-    WiFi.disconnect(false, false);
-    delay(250);
-    WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
-    WiFi.setTxPower(WIFI_POWER_19_5dBm);
-    WiFi.begin(ssid.c_str(), password.c_str());
-    started = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - started < 15000) delay(100);
+  if (wifiPhase == WifiPhase::Roaming && millis() - wifiPhaseStartedMs >= 15000) {
+    wifiCandidateIndex = 0;
+    beginBssidFallback();
+    return;
   }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    preferences.putString("ssid", ssid);
-    preferences.putString("password", password);
-    if (connectedCandidate >= 0) {
-      preferences.putBytes("bssid", candidates[connectedCandidate].bssid, 6);
-      preferences.putInt("channel", candidates[connectedCandidate].channel);
-    } else {
-      preferences.remove("bssid");
-      preferences.remove("channel");
-    }
-    Serial.printf("[PASS] Wi-Fi connected. IP address: %s\n", WiFi.localIP().toString().c_str());
-    emitWifiStatus();
-    startMqttIfConfigured();
-    wifiRetryFailures = 0;
-    wifiRetryAtMs = 0;
-    if (mqttOnline && millis() - lastHeartbeatMs >= 2000) { lastHeartbeatMs = millis(); publishMqtt(topicFor("heartbeat"), "{\"uptime_ms\":" + String(millis()) + ",\"rssi_dbm\":" + String(WiFi.RSSI()) + ",\"ip\":\"" + WiFi.localIP().toString() + "\"}"); }
-    blinkLed(2, 80, 80);
-  } else {
-    Serial.printf("[FAIL] Wi-Fi connection failed (status %d). Credentials were not saved.\n", WiFi.status());
-    WiFi.disconnect(false, false);
-    wifiRetryFailures = min<uint8_t>(wifiRetryFailures + 1, 6);
-    const uint32_t retryDelayMs = min<uint32_t>(60000, 3000UL << wifiRetryFailures);
-    wifiRetryAtMs = millis() + retryDelayMs;
-    Serial.printf("[INFO] Wi-Fi retry scheduled in %lu ms.\n", static_cast<unsigned long>(retryDelayMs));
+  if (wifiPhase == WifiPhase::BssidFallback && millis() - wifiPhaseStartedMs >= 9000) {
+    ++wifiCandidateIndex;
+    beginBssidFallback();
   }
 }
 
@@ -545,13 +543,9 @@ void loop() {
     lastWifiStatusMs = millis();
     emitWifiStatus();
   }
-  if (WiFi.status() != WL_CONNECTED && wifiRetryAtMs != 0 &&
-      static_cast<int32_t>(millis() - wifiRetryAtMs) >= 0) {
-    // The existing AP selection routine performs a bounded scan and has a
-    // bounded per-BSSID timeout; this scheduler supplies retry/backoff policy.
-    wifiRetryAtMs = 0;
-    connectSavedWifi();
-  }
+  if (wifiPhase == WifiPhase::Idle && wifiRetryAtMs != 0 &&
+      static_cast<int32_t>(millis() - wifiRetryAtMs) >= 0) connectSavedWifi();
+  tickWifiConnection();
   const uint32_t nowUs = micros();
   if (nowUs - lastAdcSampleUs >= kAdcSampleIntervalUs) {
     lastAdcSampleUs = nowUs;

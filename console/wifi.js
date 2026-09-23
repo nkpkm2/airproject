@@ -70,6 +70,8 @@ function showDevice(d) {
   $('ip').value = wifi.ip || heartbeat.ip || '未联网'; const ssid = wifi.ssid; $('ssid').value = ssid || (online ? '已连接（SSID 未上报）' : '未上报');
   $('access-point').value = wifi.bssid ? `${wifi.bssid} / CH ${wifi.channel ?? '—'}` : '—';
   $('wifi-counters').value = `${heartbeat.disconnects ?? wifi.disconnects ?? 0} / ${heartbeat.radio_recoveries ?? wifi.radio_recoveries ?? 0}`;
+  const mqtt = d.state?.mqtt || {};
+  $('mqtt-counters').value = `${heartbeat.mqtt_publish_failures ?? mqtt.publish_failures ?? 0} / ${heartbeat.telemetry_dropped ?? mqtt.telemetry_dropped ?? 0}`;
   const rssi = heartbeat.rssi_dbm ?? wifi.rssi_dbm; setSignal(rssi); $('wifi-name').textContent = ssid || (online ? '局域网已连接' : '等待 Wi-Fi 连接');
   $('wifi-status').textContent = degraded ? '心跳延迟 · 保持在线' : online ? '在线 · DHCP 地址有效' : '离线';
   $('wifi-detail').textContent = online ? `IP ${wifi.ip || heartbeat.ip || '—'} · 心跳 ${duration(d.heartbeat_age_ms || 0)}前` : '板卡上电后会自动尝试保存的 Wi-Fi';
@@ -77,7 +79,7 @@ function showDevice(d) {
   $('ack').textContent = d.ack ? `${d.ack.result || '—'} ${d.ack.request_id ? '· 已收到回复' : ''}` : '等待命令'; $('diagnostic').textContent = d.diagnostic?.event || '—';
   $('measured-rate').textContent = `${d.telemetry_stats?.received_hz ?? 0} Hz`; $('sequence-gaps').textContent = d.telemetry_stats?.sequence_gaps ?? 0;
   renderCommands(d.commands || []); renderOpto(d.state?.opto || telemetry?.opto || {}); if (d.state?.adc_mv) updateAdc(d.state.adc_mv);
-  if (telemetry?.adc_mv) { state.telemetryAt = Date.now() - (d.last_seen_age_ms || 0); updateAdc(telemetry.adc_mv); }
+  if (telemetry?.adc_mv && Number.isFinite(d.telemetry_age_ms)) { state.telemetryAt = Date.now() - d.telemetry_age_ms; updateAdc(telemetry.adc_mv); }
 }
 function renderDevices(devices) {
   $('count').textContent = devices.filter(device => device.online).length;

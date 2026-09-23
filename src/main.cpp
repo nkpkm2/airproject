@@ -56,6 +56,10 @@ uint16_t ledPatternOffMs = 100;
 uint32_t ledPatternNextMs = 0;
 uint32_t telemetryIntervalUs = 100000;
 uint32_t telemetrySequence = 0;
+uint32_t mqttPublishFailures = 0;
+uint32_t mqttTelemetryPublished = 0;
+uint32_t mqttTelemetryDropped = 0;
+uint32_t mqttPublishMaxUs = 0;
 uint32_t remoteRebootAtMs = 0;
 esp_mqtt_client_handle_t mqttClient = nullptr;
 bool mqttOnline = false;
@@ -112,29 +116,40 @@ void connectSavedWifi();
 const char* wifiPhaseName();
 
 String topicFor(const char* suffix) { return "air/v1/" + deviceId() + "/" + suffix; }
-void publishMqtt(const String& topic, const String& payload, int qos = 0, bool retain = false) {
-  if (mqttOnline && mqttClient) {
-    esp_mqtt_client_enqueue(mqttClient, topic.c_str(), payload.c_str(), payload.length(), qos, retain, true);
-  }
+bool publishMqtt(const String& topic, const String& payload, int qos = 0, bool retain = false) {
+  if (!mqttOnline || !mqttClient) return false;
+  const uint32_t startedUs = micros();
+  // QoS 0 is live data: send it directly and never put it in the persistent
+  // outbox. Older esp-mqtt releases can drain stored QoS 0 messages at only
+  // one item per second, starving heartbeat and incoming commands. QoS 1
+  // state/acks remain queued and reliable.
+  const int result = qos == 0
+    ? esp_mqtt_client_publish(mqttClient, topic.c_str(), payload.c_str(), payload.length(), 0, retain)
+    : esp_mqtt_client_enqueue(mqttClient, topic.c_str(), payload.c_str(), payload.length(), qos, retain, true);
+  mqttPublishMaxUs = max(mqttPublishMaxUs, micros() - startedUs);
+  if (result < 0) ++mqttPublishFailures;
+  return result >= 0;
 }
 void publishAck(const String& requestId, const char* result) {
   publishMqtt(topicFor("ack"), "{\"request_id\":\"" + requestId + "\",\"result\":\"" + result + "\"}", 1);
 }
 void publishState() {
   if (!mqttOnline) return;
-  char body[448];
-  snprintf(body, sizeof(body), "{\"schema\":1,\"device_id\":\"%s\",\"powered\":false,\"mode\":\"unknown\",\"uptime_ms\":%lu,\"adc_mv\":[%lu,%lu,%lu,%lu],\"opto\":{\"power\":%s,\"mode\":%s},\"wifi\":{\"ssid\":\"%s\",\"rssi_dbm\":%d,\"tx_power_dbm\":%d,\"ip\":\"%s\",\"bssid\":\"%s\",\"channel\":%ld,\"disconnects\":%lu,\"radio_recoveries\":%lu}}",
-           deviceId().c_str(), static_cast<unsigned long>(millis()), static_cast<unsigned long>(adcMillivolts[0]), static_cast<unsigned long>(adcMillivolts[1]), static_cast<unsigned long>(adcMillivolts[2]), static_cast<unsigned long>(adcMillivolts[3]), optocouplerActive[0] ? "true" : "false", optocouplerActive[1] ? "true" : "false", WiFi.SSID().c_str(), WiFi.RSSI(), kWifiTxPowerDbm, WiFi.localIP().toString().c_str(), WiFi.BSSIDstr().c_str(), static_cast<long>(WiFi.channel()), static_cast<unsigned long>(wifiDisconnectCount), static_cast<unsigned long>(wifiRadioRecoveryCount));
+  char body[576];
+  snprintf(body, sizeof(body), "{\"schema\":1,\"device_id\":\"%s\",\"powered\":false,\"mode\":\"unknown\",\"uptime_ms\":%lu,\"adc_mv\":[%lu,%lu,%lu,%lu],\"opto\":{\"power\":%s,\"mode\":%s},\"wifi\":{\"ssid\":\"%s\",\"rssi_dbm\":%d,\"tx_power_dbm\":%d,\"ip\":\"%s\",\"bssid\":\"%s\",\"channel\":%ld,\"disconnects\":%lu,\"radio_recoveries\":%lu},\"mqtt\":{\"publish_failures\":%lu,\"telemetry_published\":%lu,\"telemetry_dropped\":%lu,\"publish_max_us\":%lu}}",
+           deviceId().c_str(), static_cast<unsigned long>(millis()), static_cast<unsigned long>(adcMillivolts[0]), static_cast<unsigned long>(adcMillivolts[1]), static_cast<unsigned long>(adcMillivolts[2]), static_cast<unsigned long>(adcMillivolts[3]), optocouplerActive[0] ? "true" : "false", optocouplerActive[1] ? "true" : "false", WiFi.SSID().c_str(), WiFi.RSSI(), kWifiTxPowerDbm, WiFi.localIP().toString().c_str(), WiFi.BSSIDstr().c_str(), static_cast<long>(WiFi.channel()), static_cast<unsigned long>(wifiDisconnectCount), static_cast<unsigned long>(wifiRadioRecoveryCount), static_cast<unsigned long>(mqttPublishFailures), static_cast<unsigned long>(mqttTelemetryPublished), static_cast<unsigned long>(mqttTelemetryDropped), static_cast<unsigned long>(mqttPublishMaxUs));
   publishMqtt(topicFor("state"), body, 1, true);
 }
 void publishHeartbeat() {
   publishMqtt(topicFor("heartbeat"), "{\"uptime_ms\":" + String(millis()) +
     ",\"rssi_dbm\":" + String(WiFi.RSSI()) + ",\"tx_power_dbm\":" + String(kWifiTxPowerDbm) + ",\"ip\":\"" + WiFi.localIP().toString() +
     "\",\"wifi_phase\":\"" + wifiPhaseName() + "\",\"disconnects\":" + String(wifiDisconnectCount) +
-    ",\"radio_recoveries\":" + String(wifiRadioRecoveryCount) + "}");
+    ",\"radio_recoveries\":" + String(wifiRadioRecoveryCount) +
+    ",\"mqtt_publish_failures\":" + String(mqttPublishFailures) +
+    ",\"telemetry_dropped\":" + String(mqttTelemetryDropped) + "}");
 }
 void publishDiagnostic(const String& event) {
-  publishMqtt(topicFor("diagnostic"), "{\"uptime_ms\":" + String(millis()) + ",\"event\":\"" + event + "\"}");
+  publishMqtt(topicFor("diagnostic"), "{\"uptime_ms\":" + String(millis()) + ",\"event\":\"" + event + "\"}", 1);
 }
 void emitMqttState() {
   if (mqttOnline) Serial.println("MQTT_STATE online");
@@ -207,7 +222,7 @@ void startMqttIfConfigured() {
   // esp-mqtt retains the client-id pointer. Do not point it at deviceId(),
   // which returns a temporary String that vanishes at the end of this line.
   mqttClientId = deviceId();
-  esp_mqtt_client_config_t config{}; config.uri = mqttUri.c_str(); config.client_id = mqttClientId.c_str(); config.username = mqttUser.c_str(); config.password = mqttPassword.c_str(); config.lwt_topic = mqttAvailabilityTopic.c_str(); config.lwt_msg = "offline"; config.lwt_qos = 1; config.lwt_retain = 1; config.keepalive = 10; config.disable_auto_reconnect = false; config.event_handle = mqttEvent;
+  esp_mqtt_client_config_t config{}; config.uri = mqttUri.c_str(); config.client_id = mqttClientId.c_str(); config.username = mqttUser.c_str(); config.password = mqttPassword.c_str(); config.lwt_topic = mqttAvailabilityTopic.c_str(); config.lwt_msg = "offline"; config.lwt_qos = 1; config.lwt_retain = 1; config.keepalive = 10; config.disable_auto_reconnect = false; config.reconnect_timeout_ms = 2000; config.network_timeout_ms = 3000; config.task_prio = 6; config.event_handle = mqttEvent;
   mqttClient = esp_mqtt_client_init(&config);
   if (mqttClient) {
     lastMqttStartMs = millis();
@@ -728,7 +743,13 @@ void loop() {
   }
   if (telemetryEnabled && mqttOnline && nowUs - lastMqttTelemetryUs >= telemetryIntervalUs) {
     lastMqttTelemetryUs = nowUs;
-    publishMqtt(topicFor("telemetry"), "{\"seq\":" + String(telemetrySequence++) + ",\"uptime_ms\":" + String(millis()) + ",\"adc_mv\":[" + String(adcMillivolts[0]) + "," + String(adcMillivolts[1]) + "," + String(adcMillivolts[2]) + "," + String(adcMillivolts[3]) + "],\"opto\":{\"power\":" + String(optocouplerActive[0] ? "true" : "false") + ",\"mode\":" + String(optocouplerActive[1] ? "true" : "false") + "}}");
+    const String payload = "{\"seq\":" + String(telemetrySequence) + ",\"uptime_ms\":" + String(millis()) + ",\"adc_mv\":[" + String(adcMillivolts[0]) + "," + String(adcMillivolts[1]) + "," + String(adcMillivolts[2]) + "," + String(adcMillivolts[3]) + "],\"opto\":{\"power\":" + String(optocouplerActive[0] ? "true" : "false") + ",\"mode\":" + String(optocouplerActive[1] ? "true" : "false") + "}}";
+    if (publishMqtt(topicFor("telemetry"), payload)) {
+      ++telemetrySequence;
+      ++mqttTelemetryPublished;
+    } else {
+      ++mqttTelemetryDropped;
+    }
   }
   if (telemetryEnabled && static_cast<int32_t>(millis() - telemetryExpiresAtMs) >= 0) { telemetryEnabled = false; publishDiagnostic("remote diagnostics expired"); }
   if (remoteRebootAtMs && static_cast<int32_t>(millis() - remoteRebootAtMs) >= 0) {

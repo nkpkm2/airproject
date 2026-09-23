@@ -22,6 +22,10 @@
 | 正式固件、15 dBm | 300 秒 | Wi-Fi/MQTT 持续在线；启动期 1 次认证失败后自行恢复；无后续断线、无 radio 复位 |
 | 最终固件、15 dBm + HT20 | 180 秒 | Wi-Fi/MQTT 持续在线；857 个 RSSI 样本平均 -59.0 dBm；无后续断线 |
 | 30 台 MQTT 并发 | 60 秒 | 每台 20 Hz，合计 36,000 条/600 条每秒，发送错误 0 |
+| 端到端 ADC 阶梯（修复前） | 10 Hz | 实收约 0.9 Hz、序号缺口 46、下条命令回执超时 |
+| 端到端 ADC 阶梯（修复后） | 10–120 Hz | 七档均贴合设定频率；全部序号缺口 0；全程在线 |
+| 修复后远程重启 | 3 次 | 每次回执约 0.27 秒，约 6.1–7.7 秒恢复完整在线 |
+| 最终端到端耐久 | 644.9 秒 | 5 次重启、七档各 30 秒、静置 300 秒；全程无故障 |
 
 原始串口报告由 `tools/wifi_soak.py` 生成到 `docs/*-latest.json`，这些机器生成文件不进入版本库。
 
@@ -34,6 +38,8 @@
 5. 每次 IP 恢复后重建 MQTT 客户端及 socket，重新发布在线状态和 retained state。
 6. MQTT 心跳与状态中携带 RSSI、BSSID、信道、断线计数、radio 恢复计数及发射功率，便于定位现场问题。
 7. ADC 高频波形默认关闭，按需开启；状态变化立即上报，心跳用于存活判断，不用单个丢包判离线。
+8. QoS 0 心跳/遥测不写入 ESP-MQTT 持久 outbox；低频 QoS 1 状态和回执才进入可靠队列，避免旧版 esp-mqtt 出现一秒只排出一条消息的队头阻塞。
+9. 控制服务按每次 `seq` 回绕识别新的调试会话；流停止 2 秒后实时频率归零，但保留最后一次缺口统计，避免页面把历史频率误认为当前流量。
 
 ## 现场判定边界
 
@@ -45,3 +51,6 @@
 - `diagnostics/wifi-matrix`：在同一 BSSID 上比较协议与发射功率。
 - `tools/wifi_soak.py`：长时间读取串口并汇总断线原因、扫描错误和恢复次数。
 - `tools/mqtt_fleet_stress.py`：模拟 30 台或更多设备的 MQTT 遥测流量。
+- `tools/system_endurance.py`：经由真实 HTTP/MQTT 链路自动执行重启、命令回执、七档 ADC 频率与静置观察，并输出可机读报告。
+
+ESP-MQTT 官方 API 对 `enqueue` 的定义明确指出，`store=true` 会让 QoS 0 也进入内部 outbox；实时流现已按照该语义与可靠消息分流。参考：[Espressif ESP-MQTT API](https://github.com/espressif/esp-mqtt/blob/master/include/mqtt_client.h)。

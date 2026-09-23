@@ -20,6 +20,28 @@ class DevServerStateTests(unittest.TestCase):
         server.track_telemetry(record, {"seq": 602}, 4808)
         self.assertEqual(record["telemetry_stats"]["sequence_gaps"], 2)
 
+    def test_new_stream_resets_old_gaps_and_rate_window(self):
+        record = {}
+        server.track_telemetry(record, {"seq": 10}, 1000)
+        server.track_telemetry(record, {"seq": 20}, 2000)
+        self.assertEqual(record["telemetry_stats"]["sequence_gaps"], 9)
+        server.track_telemetry(record, {"seq": 0}, 3000)
+        self.assertEqual(record["telemetry_stats"]["sequence_gaps"], 0)
+        self.assertEqual(record["telemetry_stats"]["samples_in_window"], 1)
+
+    def test_stale_telemetry_rate_decays_without_erasing_gaps(self):
+        record = {
+            "_telemetry_seen_ms": 1_000,
+            "telemetry_stats": {"received_hz": 120.0, "sequence_gaps": 3},
+        }
+        live, live_age = server.telemetry_view(record, 2_000)
+        stale, stale_age = server.telemetry_view(record, 4_000)
+        self.assertEqual(live["received_hz"], 120.0)
+        self.assertEqual(live_age, 1_000)
+        self.assertEqual(stale["received_hz"], 0.0)
+        self.assertEqual(stale["sequence_gaps"], 3)
+        self.assertEqual(stale_age, 3_000)
+
     def test_online_degraded_offline_windows(self):
         record = {"_heartbeat_seen_ms": 100_000}
         self.assertEqual(server.classify_connection(record, 107_000)[0], "online")

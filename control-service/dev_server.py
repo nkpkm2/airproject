@@ -47,25 +47,43 @@ def classify_connection(record: dict, now: int) -> tuple[str, int | None]:
 
 def track_telemetry(record: dict, body: object, observed_at: int) -> None:
     samples = record.setdefault("_telemetry_times", deque(maxlen=1200))
+    sequence_gaps = record.get("_telemetry_sequence_gaps", 0)
+    if isinstance(body, dict) and isinstance(body.get("seq"), int):
+        previous = record.get("_telemetry_last_seq")
+        # Firmware starts each requested debug stream at sequence zero. Treat a
+        # lower number as a new measurement session so an old stress-test gap
+        # does not remain on screen forever or contaminate the rate window.
+        if isinstance(previous, int) and body["seq"] < previous:
+            samples.clear()
+            sequence_gaps = 0
     samples.append(observed_at)
     cutoff = observed_at - 5000
     while samples and samples[0] < cutoff:
         samples.popleft()
     span_ms = samples[-1] - samples[0] if len(samples) > 1 else 0
     received_hz = round((len(samples) - 1) * 1000 / span_ms, 1) if span_ms else 0.0
-    sequence_gaps = record.get("_telemetry_sequence_gaps", 0)
     if isinstance(body, dict) and isinstance(body.get("seq"), int):
         previous = record.get("_telemetry_last_seq")
         if isinstance(previous, int) and body["seq"] > previous + 1:
             sequence_gaps += body["seq"] - previous - 1
         record["_telemetry_last_seq"] = body["seq"]
-        record["_telemetry_sequence_gaps"] = sequence_gaps
+    record["_telemetry_sequence_gaps"] = sequence_gaps
     record["telemetry_stats"] = {
         "received_hz": received_hz,
         "samples_in_window": len(samples),
         "sequence_gaps": sequence_gaps,
         "window_ms": min(5000, span_ms),
     }
+
+def telemetry_view(record: dict, now: int) -> tuple[dict, int | None]:
+    stats = dict(record.get("telemetry_stats", {}))
+    seen_at = record.get("_telemetry_seen_ms")
+    age = now - seen_at if isinstance(seen_at, int) else None
+    # A completed debug stream must not leave a convincing but stale frequency
+    # on the console. Preserve the last gap count while decaying live rate.
+    if age is None or age > 2_000:
+        stats["received_hz"] = 0.0
+    return stats, age
 
 def subscribe() -> None:
     while True:
@@ -139,6 +157,9 @@ class Handler(BaseHTTPRequestHandler):
                     # Degraded devices remain present in the fleet count. One
                     # delayed heartbeat must not make a real appliance vanish.
                     record["online"] = connection_state != "offline"
+                    telemetry_stats, telemetry_age = telemetry_view(source, now)
+                    record["telemetry_stats"] = telemetry_stats
+                    record["telemetry_age_ms"] = telemetry_age
                     record["commands"] = list(record.get("commands", []))[-MAX_COMMAND_HISTORY:]
                     for key in [key for key in record if key.startswith("_")]: del record[key]
                     devices.append(record)

@@ -60,9 +60,10 @@ class DevServerStateTests(unittest.TestCase):
 
     def test_online_degraded_offline_windows(self):
         record = {"_heartbeat_seen_ms": 100_000}
-        self.assertEqual(server.classify_connection(record, 107_000)[0], "online")
-        self.assertEqual(server.classify_connection(record, 115_000)[0], "degraded")
-        self.assertEqual(server.classify_connection(record, 131_000)[0], "offline")
+        self.assertEqual(server.classify_connection(record, 103_000)[0], "online")
+        self.assertEqual(server.classify_connection(record, 103_001)[0], "degraded")
+        self.assertEqual(server.classify_connection(record, 105_000)[0], "degraded")
+        self.assertEqual(server.classify_connection(record, 105_001)[0], "offline")
 
     def test_pending_command_times_out_and_is_retained(self):
         item = {"request_id": "abc", "status": "pending", "sent_at_ms": 1_000}

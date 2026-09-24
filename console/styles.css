@@ -38,3 +38,4 @@ button:disabled{color:#808080;text-shadow:1px 1px #fff;background:#c0c0c0;border
 .folder-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .device-tree .device-card.selected{background:#000080;color:#fff;border-color:#000080}
 .dialog-command-list{display:grid;gap:7px}.dialog-command-list button{text-align:left;padding:6px 9px}
+.device-status-strip{min-width:18px;max-width:300px;display:flex;justify-content:flex-end;align-items:center;gap:4px;overflow:hidden}.device-status-square{width:16px;min-width:16px;height:16px;padding:0;border:2px solid;border-color:#fff #404040 #404040 #fff;box-shadow:1px 1px #000;background:#b00000}.device-status-square.offline{background:#c00000}.device-status-square.degraded{background:#e2b600}.device-status-square.online{background:#00a000}.device-status-square.selected{outline:1px dotted #000;outline-offset:2px}

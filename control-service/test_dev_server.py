@@ -20,6 +20,22 @@ class DevServerStateTests(unittest.TestCase):
         server.track_telemetry(record, {"seq": 602}, 4808)
         self.assertEqual(record["telemetry_stats"]["sequence_gaps"], 2)
 
+    def test_telemetry_payloads_have_incremental_cursors(self):
+        record = {}
+        server.track_telemetry(record, {"seq": 0, "adc_mv": [1, 2, 3, 4]}, 1000)
+        server.track_telemetry(record, {"seq": 1, "adc_mv": [5, 6, 7, 8]}, 1020)
+        payloads = list(record["_telemetry_payloads"])
+        self.assertEqual([item["cursor"] for item in payloads], [1, 2])
+        self.assertEqual(payloads[-1]["adc_mv"], [5, 6, 7, 8])
+
+    def test_new_stream_clears_buffer_but_keeps_cursor_monotonic(self):
+        record = {}
+        server.track_telemetry(record, {"seq": 5, "adc_mv": [1, 1, 1, 1]}, 1000)
+        server.track_telemetry(record, {"seq": 0, "adc_mv": [2, 2, 2, 2]}, 1020)
+        payloads = list(record["_telemetry_payloads"])
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]["cursor"], 2)
+
     def test_new_stream_resets_old_gaps_and_rate_window(self):
         record = {}
         server.track_telemetry(record, {"seq": 10}, 1000)

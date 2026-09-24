@@ -5,7 +5,7 @@ import json, os, re, subprocess, threading, time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 ROOT = Path(__file__).parent
@@ -19,6 +19,7 @@ DEGRADED_GRACE_MS = 30_000
 EXPLICIT_OFFLINE_GRACE_MS = 10_000
 MAX_PENDING_COMMANDS = 3
 MAX_COMMAND_HISTORY = 50
+RUNTIME_ID = uuid4().hex
 CATALOG_PATH = ROOT / "data" / "device_catalog.json"
 DEFAULT_ROOMS = ["客厅", "餐厅", "主卧", "次卧", "书房", "厨房", "玄关 / 走廊"]
 
@@ -102,6 +103,7 @@ def track_telemetry(record: dict, body: object, observed_at: int) -> None:
         if isinstance(previous, int) and body["seq"] < previous:
             samples.clear()
             sequence_gaps = 0
+            record.setdefault("_telemetry_payloads", deque(maxlen=600)).clear()
     samples.append(observed_at)
     cutoff = observed_at - 5000
     while samples and samples[0] < cutoff:
@@ -114,6 +116,16 @@ def track_telemetry(record: dict, body: object, observed_at: int) -> None:
             sequence_gaps += body["seq"] - previous - 1
         record["_telemetry_last_seq"] = body["seq"]
     record["_telemetry_sequence_gaps"] = sequence_gaps
+    if isinstance(body, dict) and isinstance(body.get("adc_mv"), list):
+        cursor = record.get("_telemetry_cursor", 0) + 1
+        record["_telemetry_cursor"] = cursor
+        record.setdefault("_telemetry_payloads", deque(maxlen=600)).append({
+            "cursor": cursor,
+            "observed_at_ms": observed_at,
+            "seq": body.get("seq"),
+            "adc_mv": body["adc_mv"],
+            "opto": body.get("opto", {}),
+        })
     record["telemetry_stats"] = {
         "received_hz": received_hz,
         "samples_in_window": len(samples),
@@ -197,10 +209,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         return self.reply(204, {})
     def do_GET(self) -> None:
-        if urlparse(self.path).path == "/health": return self.reply(200, {"status": "ok", "runtime": "stdlib"})
-        if urlparse(self.path).path == "/api/v1/catalog":
+        parsed = urlparse(self.path); path = parsed.path
+        if path == "/health": return self.reply(200, {"status": "ok", "runtime": "stdlib"})
+        if path == "/api/v1/catalog":
             with LOCK: return self.reply(200, public_catalog())
-        if urlparse(self.path).path == "/api/v1/devices":
+        parts = path.split("/")
+        if len(parts) == 6 and parts[1:4] == ["api", "v1", "devices"] and parts[5] == "telemetry":
+            try: after = max(0, int(parse_qs(parsed.query).get("after", ["0"])[0]))
+            except ValueError: after = 0
+            with LOCK:
+                record = DEVICES.get(parts[4])
+                if record is None: return self.reply(404, {"error": "device not found"})
+                buffered = record.get("_telemetry_payloads", ())
+                values = [dict(sample) for sample in buffered if sample["cursor"] > after]
+                return self.reply(200, {
+                    "runtime_id": RUNTIME_ID,
+                    "cursor": record.get("_telemetry_cursor", 0),
+                    "samples": values,
+                })
+        if path == "/api/v1/devices":
             with LOCK:
                 now = int(time.time() * 1000)
                 devices = []

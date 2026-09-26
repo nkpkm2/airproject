@@ -61,3 +61,15 @@ input[type=checkbox]{accent-color:#000080}
 @media(max-width:1050px){.top-summary .legend{display:none}.shell{grid-template-columns:235px 1fr}.command-panel{gap:4px}.command-panel>span{display:none}.mode-buttons button{min-width:44px;padding-left:6px;padding-right:6px}}
 @media(max-width:820px){html,body{min-width:640px}.brand{flex-basis:170px}.top-summary{display:none}.shell{grid-template-columns:210px 1fr}.fleet-stats{grid-template-columns:repeat(2,1fr);height:78px}.fleet-stats div:nth-child(2){border-right:0}.fleet-stats div:nth-child(-n+2){border-bottom:1px solid #808080}.floor-plan{min-height:460px}.plan-device{width:68px}}
 .embedded>.topbar{display:none}.embedded>.shell{height:100vh;min-height:590px;margin:0}.embedded{overflow:auto}
+
+/* Office 2003 workspace geometry with Windows 9x industrial controls. */
+:root{--face:#d4d0c8;--mid:#ece9d8;--desktop:#7f7f7f}
+html,body{background:var(--desktop)}
+.shell{gap:3px;padding:3px;margin:0;background:#7f7f7f;border-width:1px;grid-template-columns:218px minmax(0,1fr)}
+.library,.home{border-width:1px}.library{padding:3px;background:var(--mid)}.home{padding:5px;background:#f6f5ee}
+.section-head{height:28px;margin:-3px -3px 0;padding:3px 6px;color:#fff;background:linear-gradient(90deg,#315a92,#8ba9cc);border-bottom:1px solid #315277}.section-head p{display:none}.section-head h1{font-size:12px}.count{height:20px;padding:1px;color:#000}
+.fleet-stats{height:47px;margin:4px 0;border-width:1px}.fleet-stats b{font-size:14px}.device-list{border-width:1px}.device-card{min-height:46px}.library-note{height:55px;margin-top:4px;line-height:14px}
+.home-head{height:49px;flex-basis:49px;padding:2px 3px 5px}.home-head p{display:none}.home-head h2{font-size:16px;color:#1f4778}.command-panel{gap:5px}.command-panel>span{padding:3px 2px}.mode-buttons{gap:2px}.mode-buttons button{min-width:49px}
+.floor-plan{margin-top:5px;padding:4px;gap:3px;border-width:1px}.room{border-width:2px;background:#e8e5d6}.room>span{left:5px;top:5px;background:#f8f7ef}.plan-device{width:72px;height:48px;border-width:1px;box-shadow:2px 2px rgba(0,0,0,.22)}
+button{border-width:1px;box-shadow:inset 1px 1px #fff,inset -1px -1px #808080}.embedded>.shell{height:100vh;min-height:590px;margin:0}.embedded{background:#7f7f7f}
+@media(max-width:1050px){.shell{grid-template-columns:195px 1fr}}

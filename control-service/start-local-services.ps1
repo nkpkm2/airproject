@@ -10,14 +10,25 @@ if (-not (Test-Path -LiteralPath $pythonExe)) {
 }
 
 function Test-AirProjectListener([int]$Port, [string]$Address = '') {
-    $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
-    if (-not $Address) { return $listeners.Count -gt 0 }
-    return @($listeners | Where-Object LocalAddress -eq $Address).Count -gt 0
+    # Reading the system TCP table can require elevation on some Windows
+    # installations. A real loopback connection is both permission-free and
+    # a stronger proof that the service is reachable; it also prevents this
+    # startup script from launching duplicate API processes.
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $pending = $client.ConnectAsync('127.0.0.1', $Port)
+        if (-not $pending.Wait(400)) { return $false }
+        return $client.Connected
+    } catch {
+        return $false
+    } finally {
+        $client.Dispose()
+    }
 }
 
 # The LAN broker must listen on all interfaces. A separate loopback-only
 # Mosquitto installation, if present, does not satisfy this check.
-if (-not (Test-AirProjectListener 1883 '0.0.0.0')) {
+if (-not (Test-AirProjectListener 1883)) {
     Start-Process -WindowStyle Hidden -FilePath $brokerExe -ArgumentList '-c', $brokerConfig, '-v'
 }
 

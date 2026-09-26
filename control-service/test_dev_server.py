@@ -1,6 +1,7 @@
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 MODULE_PATH = Path(__file__).with_name("dev_server.py")
@@ -97,6 +98,120 @@ class DeviceCatalogTests(unittest.TestCase):
         exported = server.public_catalog()
         exported["devices"]["pur-test"]["alias"] = "changed"
         self.assertEqual(server.CATALOG["devices"]["pur-test"]["alias"], "pur-test")
+
+    def test_hidden_device_requires_real_offline_online_edge(self):
+        profile = server.device_profile("pur-test")
+        profile["hidden"] = True
+        record = {"availability": "online"}
+        self.assertFalse(server.is_device_rediscovery(record, profile, "availability", "online"))
+        record["availability"] = "offline"
+        self.assertTrue(server.is_device_rediscovery(record, profile, "availability", "online"))
+
+    def test_catalog_restore_sanitizes_external_data(self):
+        restored = server.restore_catalog({
+            "rooms": ["客厅", "客厅", ""],
+            "groups": [{"id": "Main Group!", "name": "主组"}],
+            "devices": {"pur-test": {"alias": "测试", "group_ids": ["main-group", "missing"]}},
+        })
+        self.assertEqual(restored["rooms"], ["客厅"])
+        self.assertEqual(restored["groups"][0]["id"], "main-group")
+        self.assertEqual(restored["devices"]["pur-test"]["group_ids"], ["main-group"])
+
+
+class EngineeringToolTests(unittest.TestCase):
+    def setUp(self):
+        self.tools = server.engineering_tools.__class__()
+
+    def test_stress_parameters_are_rejected_instead_of_silently_changed(self):
+        with self.assertRaisesRegex(ValueError, "1–60"):
+            self.tools._validate("mqtt_stress", {"devices": 999, "rate": 20, "duration": 30})
+
+    def test_high_load_stress_requires_explicit_confirmation(self):
+        request = {"devices": 30, "rate": 60, "duration": 30}
+        with self.assertRaisesRegex(ValueError, "明确确认"):
+            self.tools._validate("mqtt_stress", request)
+        request["confirmation"] = "我了解这是高负载测试"
+        self.assertTrue(self.tools._validate("mqtt_stress", request)["high_load"])
+
+    def test_stress_uses_isolated_topic(self):
+        job = {"kind": "mqtt_stress", "params": {"devices": 3, "rate": 5, "duration": 5}}
+        command = self.tools._command(job)
+        self.assertIn("air/loadtest/v1", command)
+
+    def test_unknown_serial_device_is_never_accepted_for_board_write(self):
+        ordinary = {"device": "COM5", "description": "STLink", "hardware_id": "x", "serial_number": "", "vid": 1, "pid": 2, "likely_esp32": False}
+        with patch.object(self.tools, "_find_port", return_value=ordinary):
+            with self.assertRaisesRegex(ValueError, "未识别为 ESP32"):
+                self.tools._validate("board_check", {"port": "COM5"})
+
+    def test_flash_requires_server_side_prerequisites_and_exact_phrase(self):
+        esp = {"device": "COM6", "description": "ESP32", "hardware_id": "x", "serial_number": "abc", "vid": 0x303A, "pid": 0x1001, "likely_esp32": True}
+        blocked = {"blockers": ["请先编译"], "confirmation_text": "写入 COM6", "build": None}
+        with patch.object(self.tools, "_find_port", return_value=esp), patch.object(self.tools, "safety_status", return_value=blocked):
+            with self.assertRaisesRegex(ValueError, "请先编译"):
+                self.tools._validate("flash_firmware", {"port": "COM6", "confirmation": "写入 COM6"})
+        ready = {"blockers": [], "confirmation_text": "写入 COM6", "build": {"source_sha256": "source", "firmware_sha256": "firmware"}}
+        with patch.object(self.tools, "_find_port", return_value=esp), patch.object(self.tools, "safety_status", return_value=ready):
+            with self.assertRaisesRegex(ValueError, "准确输入"):
+                self.tools._validate("flash_firmware", {"port": "COM6", "confirmation": "yes"})
+            validated = self.tools._validate("flash_firmware", {"port": "COM6", "confirmation": "写入 COM6"})
+            self.assertEqual(validated["firmware_sha256"], "firmware")
+
+    def test_automatic_provision_requires_exact_target_confirmation(self):
+        esp = {"device": "COM8", "description": "ESP32", "hardware_id": "x", "serial_number": "abc", "vid": 0x303A, "pid": 0x1001, "likely_esp32": True}
+        with patch.object(self.tools, "_find_port", return_value=esp):
+            with self.assertRaisesRegex(ValueError, "准确输入"):
+                self.tools._validate("provision_board", {"port": "COM8", "confirmation": "yes"})
+            values = self.tools._validate("provision_board", {"port": "COM8", "confirmation": "自动验收并写入 COM8"})
+            self.assertEqual(values["port"], "COM8")
+
+    def test_automatic_provision_stops_before_write_when_chip_check_fails(self):
+        job_id = "provision-failure"
+        job = {"job_id": job_id, "kind": "provision_board", "status": "running", "summary": "",
+            "params": {"port": "COM8", "port_fingerprint": "fingerprint", "environment": "esp32-c3-super-mini"},
+            "result": {}, "log": server.deque(maxlen=50)}
+        self.tools._jobs[job_id] = job; self.tools._active_job_id = job_id
+        with patch.object(self.tools, "_recheck_before_run"), patch.object(self.tools, "_wait_for_same_port"), \
+                patch.object(self.tools, "_execute_process", return_value=(2, ["check failed"])) as execute:
+            self.tools._run_provision(job_id, job)
+        self.assertEqual(execute.call_count, 3)
+        self.assertEqual(job["status"], "failed")
+        self.assertFalse(job["result"]["accepted"])
+        self.assertNotIn("write_performed", job["result"])
+
+    def test_automatic_provision_reports_acceptance_only_after_runtime_checks(self):
+        job_id = "provision-success"
+        job = {"job_id": job_id, "kind": "provision_board", "status": "running", "summary": "",
+            "params": {"port": "COM8", "port_fingerprint": "fingerprint", "environment": "esp32-c3-super-mini"},
+            "result": {}, "log": server.deque(maxlen=50)}
+        self.tools._jobs[job_id] = job; self.tools._active_job_id = job_id
+        process_results = [(0, ["MAC: 30:ed:a0:5b:00:bc"]), (0, ["build ok"]), (0, ["upload ok"])]
+        runtime = {"device_id": "pur-30eda05b00bc", "ip": "192.168.1.10", "rssi_dbm": -55,
+            "boot_verified": True, "wifi_verified": True, "mqtt_verified": True, "blue_led_expected": "fast_blink"}
+        with patch.object(self.tools, "_recheck_before_run"), patch.object(self.tools, "_wait_for_same_port"), \
+                patch.object(self.tools, "_execute_process", side_effect=process_results), \
+                patch.object(self.tools, "_verify_firmware_runtime", return_value=runtime):
+            self.tools._run_provision(job_id, job)
+        self.assertEqual(job["status"], "succeeded")
+        self.assertTrue(job["result"]["accepted"])
+        self.assertTrue(job["result"]["write_performed"])
+        self.assertTrue(all(item["status"] == "passed" for item in job["result"]["steps"]))
+
+    def test_only_flash_policy_can_write_a_board(self):
+        policy_table = server.environment_report.__globals__["TOOL_POLICY"]
+        writers = [name for name, policy in policy_table.items() if policy["writes_board"]]
+        self.assertEqual(set(writers), {"provision_board", "flash_firmware"})
+
+    def test_unknown_job_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            self.tools.start({"kind": "arbitrary_command"})
+
+    def test_environment_report_has_required_capabilities(self):
+        report = server.environment_report()
+        self.assertIn("ports", report)
+        self.assertIn("platformio", report)
+        self.assertIn("firmware_exists", report)
+        self.assertIn("tool_policy", report)
 
 
 if __name__ == "__main__":

@@ -5,23 +5,90 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#000080">
   <title>家庭空气管理控制台</title>
-  <link rel="stylesheet" href="control.css?v=20260924b">
+  <link rel="stylesheet" href="control.css?v=20260926a">
 </head>
 <body>
-  <header class="control-bar">
-    <div class="control-brand"><span class="control-icon">▣</span><span>家庭空气管理控制台</span></div>
-    <nav class="control-tabs" aria-label="主控制台视图">
-      <button data-view="fleet">家庭总览</button>
-      <button data-view="serial">板卡串口调试</button>
-      <button data-view="wifi">板卡 Wi‑Fi 调试</button>
+  <header class="application-chrome">
+    <div class="title-bar">
+      <div class="control-brand"><span class="control-icon">▣</span><span>家庭空气管理控制台</span></div>
+      <div class="title-context">空气净化器设备管理与工程调试</div>
+    </div>
+    <nav class="menu-bar" aria-label="应用程序菜单">
+      <button data-menu="system"><u>系</u>统(S)</button><button data-menu="device"><u>设</u>备(D)</button><button data-menu="control"><u>控</u>制(C)</button><button data-menu="tools"><u>诊</u>断工具(T)</button><button data-menu="view"><u>视</u>图(V)</button><button data-menu="workspace"><u>工</u>作区(W)</button><button data-menu="help"><u>帮</u>助(H)</button>
     </nav>
-    <div class="control-health"><span id="service-lamp"></span><span id="service-text">检查本机服务…</span></div>
+    <div class="control-bar">
+      <span class="toolbar-grip" aria-hidden="true"></span>
+      <span class="toolbar-caption">工作区</span>
+      <nav class="control-tabs" aria-label="主控制台视图">
+        <button data-view="fleet"><span class="tab-icon">⌂</span>家庭总览</button>
+        <button data-view="serial"><span class="tab-icon">▣</span>板卡串口调试</button>
+        <button data-view="wifi"><span class="tab-icon">⌁</span>板卡 Wi‑Fi 调试</button>
+      </nav>
+      <div class="control-health"><span id="service-lamp"></span><span id="service-text">检查本机服务…</span></div>
+    </div>
   </header>
   <main class="control-stage">
-    <iframe data-panel="fleet" src="fleet.html?embedded=1&amp;v=20260924d" title="家庭总览"></iframe>
-    <iframe data-panel="serial" src="serial.html?embedded=1&amp;v=20260924b" title="板卡串口调试" allow="serial"></iframe>
-    <iframe data-panel="wifi" src="wifi.html?embedded=1&amp;v=20260924l" title="板卡 Wi-Fi 调试"></iframe>
+    <iframe data-panel="fleet" src="fleet.html?embedded=1&amp;v=20260924e" title="家庭总览"></iframe>
+    <iframe data-panel="serial" src="serial.html?embedded=1&amp;v=20260926n" title="板卡串口调试" allow="serial"></iframe>
+    <iframe data-panel="wifi" src="wifi.html?embedded=1&amp;v=20260926o" title="板卡 Wi-Fi 调试"></iframe>
   </main>
+  <footer class="control-status"><span>就绪</span><span>本机控制服务</span><span>切换工作区不会断开串口或远程调试会话</span></footer>
+  <div id="menu-popup" class="menu-popup" hidden></div>
+  <input id="restore-file" type="file" accept="application/json,.json" hidden>
+
+  <dialog id="engineering-dialog" class="control-dialog engineering-dialog">
+    <div class="dialog-title"><span>诊断工具中心</span><button data-dialog-close="engineering-dialog" aria-label="关闭">×</button></div>
+    <div class="engineering-body">
+      <aside class="tool-nav" aria-label="诊断工具分类">
+        <button class="active" data-tool-page="board">新板自动烧录验收</button>
+        <button data-tool-page="peripheral">焊接后外设检查</button>
+        <button data-tool-page="stress">压力测试</button>
+        <button data-tool-page="environment">工程环境</button>
+      </aside>
+      <section class="tool-page active" data-tool-content="board">
+        <h2>ESP32-C3 新板自动烧录验收</h2>
+        <p class="dialog-help">选择一块新板并确认一次后，系统自动完成芯片检查、编译、写入校验、固件启动以及 Wi-Fi/MQTT 联网验收。中途任一步失败都会停止，不会跳过后继续。</p>
+        <fieldset><legend>目标板卡</legend><div class="form-row"><label>串口<select id="engineering-port"></select></label><button id="refresh-ports">重新扫描</button></div><div id="port-description" class="inset-box">正在扫描串口…</div></fieldset>
+        <div class="tool-actions"><button id="provision-board" data-engineering-job="provision_board" class="danger" disabled>开始自动检测、烧录并验收</button></div>
+        <div id="flash-safety" class="inset-box">正在确认目标板卡和工程环境…</div>
+        <div id="provision-steps" class="provision-steps"><span>○ 识别并检查芯片</span><span>○ 编译并锁定固件</span><span>○ 写入并校验 Flash</span><span>○ 验证固件启动</span><span>○ 验证 Wi-Fi 与 MQTT</span></div>
+        <ol class="checklist"><li>芯片检查阶段只读取 ESP32-C3 身份，不写 Flash；检查失败立即停止。</li><li>编译期间如果源码变化，流程立即停止，不会写入来源不确定的固件。</li><li>烧录前再次核对同一个 USB 设备；上传工具必须完成 Flash 校验。</li><li>烧录后主动询问设备 ID、Wi-Fi 和 MQTT；全部通过才显示“验收合格”，此时蓝灯应快速闪烁。</li></ol>
+      </section>
+      <section class="tool-page" data-tool-content="peripheral">
+        <h2>焊接后外设检查</h2><p class="dialog-help">需要万用表或实际照光的步骤由操作者确认，软件不会伪造结果。</p>
+        <div class="wizard-grid"><article><b>四路 ADC 响应</b><p>进入串口调试，观察 GPIO4、GPIO3、GPIO1、GPIO0 的电压与波形。</p><button data-command-action="serial">打开串口调试</button></article><article><b>GPIO5 电源光耦</b><p>分别执行导通、断开与 300 ms 脉冲，并用万用表确认。</p><button data-command-action="serial">打开光耦面板</button></article><article><b>GPIO7 模式光耦</b><p>确认模式控制端在导通和断开时符合电路设计。</p><button data-command-action="serial">打开光耦面板</button></article><article><b>Wi‑Fi 安装角度</b><p>使用实时 RSSI 观察页寻找信号最强的安装方向。</p><button data-command-action="wifi">打开 Wi‑Fi 调试</button></article></div>
+      </section>
+      <section class="tool-page" data-tool-content="stress">
+        <h2>MQTT 并发压力测试</h2><p class="dialog-help">生成临时虚拟设备遥测，测量 Broker 接受速率。消息只进入 air/loadtest/v1，不会进入真实设备目录，也不会发送控制命令或保留消息。</p>
+        <div class="stress-grid"><label>虚拟设备数<input id="stress-devices" type="number" min="1" max="60" value="30"></label><label>每台频率<input id="stress-rate" type="number" min="1" max="120" value="20"><span>Hz</span></label><label>持续时间<input id="stress-duration" type="number" min="5" max="300" value="30"><span>秒</span></label><button data-engineering-job="mqtt_stress">开始测试</button></div>
+        <p>30 台 × 20 Hz 相当于每秒约 600 条遥测消息。超过每秒 1200 条或超过 60 秒属于高负载，开始前会再次确认；越界参数将直接拒绝，不会悄悄改成别的数值。</p>
+      </section>
+      <section class="tool-page" data-tool-content="environment">
+        <h2>工程环境检查</h2><div id="environment-grid" class="environment-grid"><span>正在读取环境…</span></div><button id="refresh-environment">重新检查</button>
+      </section>
+    </div>
+    <section class="job-console"><div class="job-head"><b id="job-title">本轮尚未开始</b><span id="job-status">待命</span><button id="show-latest-job" disabled>查看上次记录</button><button id="clear-job-view">清空显示</button><button id="export-job" disabled>导出报告</button></div><pre id="job-log">请连接一块新板，然后开始新一轮自动验收。旧任务不会自动占用本轮显示区。</pre></section>
+  </dialog>
+
+  <dialog id="help-dialog" class="control-dialog help-dialog">
+    <div class="dialog-title"><span>系统帮助与架构</span><button data-dialog-close="help-dialog" aria-label="关闭">×</button></div>
+    <div class="help-layout"><nav><button data-help-page="architecture" class="active">系统架构</button><button data-help-page="pins">引脚定义</button><button data-help-page="status">状态与指示灯</button><button data-help-page="workflow">新板工作流程</button><button data-help-page="about">版本信息</button></nav><article id="help-content"></article></div>
+  </dialog>
+
+  <dialog id="settings-dialog" class="control-dialog settings-dialog">
+    <div class="dialog-title"><span>系统设置</span><button data-dialog-close="settings-dialog" aria-label="关闭">×</button></div>
+    <div class="dialog-form"><label>默认工作区<select id="default-view"><option value="fleet">家庭总览</option><option value="serial">板卡串口调试</option><option value="wifi">板卡 Wi‑Fi 调试</option></select></label><p>固件写入的安全确认是强制规则，不能在设置中关闭。这里的设置只保存在当前电脑的浏览器中，不会写入 ESP32。</p></div><div class="dialog-buttons"><button data-dialog-close="settings-dialog">取消</button><button id="save-settings">保存</button></div>
+  </dialog>
+  <dialog id="engineering-confirm-dialog" class="control-dialog confirm-dialog">
+    <div class="dialog-title"><span>确认写入目标板卡</span><button id="engineering-confirm-close" aria-label="取消">×</button></div>
+    <div class="dialog-form">
+      <p id="engineering-confirm-message"></p>
+      <label class="confirm-input-label">确认文字<input id="engineering-confirm-input" type="text" autocomplete="off" spellcheck="false"></label>
+      <div class="inset-box">需要输入：<b id="engineering-confirm-expected"></b></div>
+    </div>
+    <div class="dialog-buttons"><button id="engineering-confirm-cancel">取消</button><button id="engineering-confirm-accept" disabled>确认并开始</button></div>
+  </dialog>
   <script src="control.js?v=20260924b"></script>
+  <script src="control-tools.js?v=20260926c"></script>
 </body>
 </html>

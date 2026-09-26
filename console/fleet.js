@@ -1,4 +1,5 @@
 const api='http://127.0.0.1:8780/api/v1';
+if(new URLSearchParams(location.search).has('embedded'))document.body.classList.add('embedded');
 const $=id=>document.getElementById(id),labels={offline:'离线',off:'关机',low:'低速',medium:'中速',high:'高速',auto:'自动'},cycles=['low','medium','high','auto'];
 const selectedIds=new Set(),selectedRooms=new Set(),savedPositions=JSON.parse(localStorage.getItem('purifier-plan-positions')||'{}');
 let devices=[],contextDevice=null,dragging=null;

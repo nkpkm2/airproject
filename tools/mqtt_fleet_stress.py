@@ -52,6 +52,7 @@ def main() -> int:
     parser.add_argument("--devices", type=int, default=30)
     parser.add_argument("--rate", type=float, default=20.0, help="telemetry Hz per device")
     parser.add_argument("--duration", type=float, default=60.0)
+    parser.add_argument("--topic-root", default="air/loadtest/v1", help="isolated MQTT topic root")
     args = parser.parse_args()
     if args.devices < 1 or args.rate <= 0 or args.duration <= 0:
         parser.error("devices, rate and duration must be positive")
@@ -93,10 +94,10 @@ def main() -> int:
             for index in range(args.devices):
                 device_id = f"{prefix}-{index:02d}"
                 payload = json.dumps({"seq": sequence, "adc_mv": [12, 18, 9, 14]}, separators=(",", ":"))
-                frame += publish_packet(f"air/v1/{device_id}/telemetry", payload)
+                frame += publish_packet(f"{args.topic_root}/{device_id}/telemetry", payload)
                 if sequence % max(1, round(args.rate * 2)) == 0:
                     heartbeat = json.dumps({"uptime_ms": int((now - started) * 1000), "rssi_dbm": -60})
-                    frame += publish_packet(f"air/v1/{device_id}/heartbeat", heartbeat)
+                    frame += publish_packet(f"{args.topic_root}/{device_id}/heartbeat", heartbeat)
             try:
                 sock.sendall(frame)
                 published += args.devices
@@ -123,6 +124,7 @@ def main() -> int:
         "accepted_messages": published,
         "publish_errors": errors,
         "aggregate_messages_per_second": round(published / elapsed, 1),
+        "topic_root": args.topic_root,
     }, ensure_ascii=False))
     return 0 if published == expected and errors == 0 else 2
 

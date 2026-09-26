@@ -1,7 +1,7 @@
 """Dependency-free local MQTT control service for Windows development."""
 from __future__ import annotations
 
-import json, os, re, subprocess, threading, time
+import json, os, re, subprocess, sys, threading, time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -9,6 +9,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 ROOT = Path(__file__).parent
+if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
+from engineering_tools import environment_report, serial_ports, tools as engineering_tools
 ENV = dict(line.split("=", 1) for line in (ROOT / ".env").read_text(encoding="utf-8-sig").splitlines() if "=" in line)
 MQTT = Path(r"C:\Program Files\mosquitto")
 DEVICES: dict[str, dict] = {}
@@ -59,6 +61,30 @@ def public_catalog() -> dict:
         "devices": {key: dict(value) for key, value in CATALOG["devices"].items()},
     }
 
+def restore_catalog(data: object) -> dict:
+    if not isinstance(data, dict): raise ValueError("catalog must be an object")
+    rooms = [str(value).strip()[:40] for value in data.get("rooms", []) if str(value).strip()]
+    groups = []
+    for source in data.get("groups", []):
+        if not isinstance(source, dict): continue
+        group_id = re.sub(r"[^a-z0-9-]+", "-", str(source.get("id", "")).lower()).strip("-")[:48]
+        name = str(source.get("name", "")).strip()[:40]
+        if group_id and name: groups.append({"id": group_id, "name": name, "parent_id": source.get("parent_id") or None})
+    valid_groups = {item["id"] for item in groups}
+    devices = {}
+    for device_id, source in data.get("devices", {}).items():
+        if not isinstance(source, dict): continue
+        key = str(device_id).strip()[:96]
+        if not key: continue
+        devices[key] = {
+            "alias": str(source.get("alias", key)).strip()[:64] or key,
+            "purifier_number": str(source.get("purifier_number", "")).strip()[:64],
+            "room": str(source.get("room", "未分配")).strip()[:64] or "未分配",
+            "group_ids": [str(value) for value in source.get("group_ids", []) if str(value) in valid_groups],
+            "hidden": bool(source.get("hidden", False)),
+        }
+    return {"rooms": list(dict.fromkeys(rooms or DEFAULT_ROOMS)), "groups": groups, "devices": devices}
+
 def safe_group_id(name: str) -> str:
     stem = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "group"
     candidate, suffix = stem, 2
@@ -91,6 +117,14 @@ def classify_connection(record: dict, now: int) -> tuple[str, int | None]:
     if signal_age <= DEGRADED_GRACE_MS:
         return "degraded", signal_age
     return "offline", signal_age
+
+def is_device_rediscovery(record: dict, profile: dict, category: str, body: object) -> bool:
+    return (
+        category == "availability"
+        and body == "online"
+        and record.get("availability") != "online"
+        and bool(profile.get("hidden"))
+    )
 
 def track_telemetry(record: dict, body: object, observed_at: int) -> None:
     samples = record.setdefault("_telemetry_times", deque(maxlen=1200))
@@ -165,7 +199,11 @@ def subscribe() -> None:
                     # Deleting removes a device from the directory, not from
                     # the network. A later MQTT online announcement proves a
                     # new session and automatically discovers it again.
-                    rediscovered = category == "availability" and body == "online" and profile.get("hidden")
+                    # A device hidden during an active session must not pop
+                    # straight back into the directory when firmware repeats
+                    # availability=online.  Only a real offline -> online edge
+                    # proves that it has connected again after being removed.
+                    rediscovered = is_device_rediscovery(record, profile, category, body)
                     if rediscovered:
                         profile["hidden"] = False
                     if is_new_profile or rediscovered:
@@ -211,6 +249,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path); path = parsed.path
         if path == "/health": return self.reply(200, {"status": "ok", "runtime": "stdlib"})
+        if path == "/api/v1/tools/environment": return self.reply(200, environment_report())
+        if path == "/api/v1/tools/ports": return self.reply(200, serial_ports())
+        if path == "/api/v1/tools/safety":
+            return self.reply(200, engineering_tools.safety_status(parse_qs(parsed.query).get("port", [""])[0]))
+        if path == "/api/v1/tools/jobs": return self.reply(200, engineering_tools.list_jobs())
+        if len(path.split("/")) == 6 and path.split("/")[1:5] == ["api", "v1", "tools", "jobs"]:
+            job = engineering_tools.get_job(path.split("/")[5])
+            return self.reply(200, job) if job else self.reply(404, {"error": "job not found"})
         if path == "/api/v1/catalog":
             with LOCK: return self.reply(200, public_catalog())
         parts = path.split("/")
@@ -231,8 +277,14 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 now = int(time.time() * 1000)
                 devices = []
-                for source in DEVICES.values():
-                    profile = device_profile(source["device_id"])
+                # The directory is persistent management data.  After the
+                # service restarts, previously discovered but currently
+                # silent devices must remain visible as offline instead of
+                # disappearing until their next MQTT packet.
+                device_ids = list(dict.fromkeys([*DEVICES, *CATALOG["devices"]]))
+                for device_id in device_ids:
+                    source = DEVICES.get(device_id, {"device_id": device_id})
+                    profile = device_profile(device_id)
                     if profile.get("hidden"): continue
                     expire_commands(source, now)
                     record = dict(source)
@@ -257,6 +309,16 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/v1/tools/jobs":
+            try: return self.reply(202, engineering_tools.start(self.read_json()))
+            except Exception as error: return self.reply(400, {"error": str(error)})
+        if path == "/api/v1/catalog/restore":
+            try:
+                restored = restore_catalog(self.read_json().get("catalog", {}))
+                with LOCK:
+                    CATALOG.clear(); CATALOG.update(restored); save_catalog()
+                return self.reply(200, public_catalog())
+            except Exception as error: return self.reply(400, {"error": str(error)})
         if path in {"/api/v1/rooms", "/api/v1/groups"}:
             try:
                 body = self.read_json(); name = str(body.get("name", "")).strip()[:40]

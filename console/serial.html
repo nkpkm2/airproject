@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#000080">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1220'/%3E%3Cpath d='M32 10c10 10 18 18 18 29a18 18 0 1 1-36 0c0-11 8-19 18-29Z' fill='%2338d996'/%3E%3Cpath d='M22 40h20M32 21v25' stroke='%230b1220' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E">
   <title>空气净化器 · 调试台</title>
-  <link rel="stylesheet" href="styles.css?v=20260926n">
+  <link rel="stylesheet" href="styles.css?v=20261009c">
 </head>
 <body>
   <header class="topbar">
@@ -54,14 +54,25 @@
       </div>
 
       <section class="panel sensors-panel">
-        <div class="panel-heading"><div><h2>四路光传感器 / ADC</h2><p>TEMT6000 检测净化器指示灯。开发板以 5 ms 采样；网页每 20 ms 接收一帧并显示右进左移的波形。</p></div><div class="sensor-tools"><span id="sensors-tag" class="tag muted">等待 USB 样本</span><button id="adc-test-button">5 ms 压测</button></div></div>
+        <div class="panel-heading"><div><h2>四路光敏电阻 / ADC</h2><p>光敏电阻检测净化器指示灯。开发板以 5 ms 采样；网页每 20 ms 接收一帧并显示右进左移的原始波形。</p></div><div class="sensor-tools"><span id="sensors-tag" class="tag muted">等待 USB 样本</span><button id="adc-test-button">5 ms 压测</button></div></div>
         <p id="adc-test-result" class="adc-test-result">串口带宽测试：尚未开始。</p>
         <div class="adc-grid">
-          <article class="adc-card" data-adc="low"><div class="adc-header"><span>ADC 1 · GPIO4</span><b>低速灯</b></div><div class="adc-value"><strong>—</strong><span>V</span></div><div class="vertical-meter"><canvas class="adc-scope" width="260" height="86" aria-label="低速灯 ADC 波形"></canvas></div><div class="adc-footer"><span>阈值待标定</span><span class="lamp unknown">采样待命</span></div></article>
-          <article class="adc-card" data-adc="medium"><div class="adc-header"><span>ADC 2 · GPIO3</span><b>中速灯</b></div><div class="adc-value"><strong>—</strong><span>V</span></div><div class="vertical-meter"><canvas class="adc-scope" width="260" height="86" aria-label="中速灯 ADC 波形"></canvas></div><div class="adc-footer"><span>阈值待标定</span><span class="lamp unknown">采样待命</span></div></article>
-          <article class="adc-card" data-adc="high"><div class="adc-header"><span>ADC 3 · GPIO1</span><b>高速灯</b></div><div class="adc-value"><strong>—</strong><span>V</span></div><div class="vertical-meter"><canvas class="adc-scope" width="260" height="86" aria-label="高速灯 ADC 波形"></canvas></div><div class="adc-footer"><span>阈值待标定</span><span class="lamp unknown">采样待命</span></div></article>
-          <article class="adc-card" data-adc="auto"><div class="adc-header"><span>ADC 4 · GPIO0</span><b>自动灯</b></div><div class="adc-value"><strong>—</strong><span>V</span></div><div class="vertical-meter"><canvas class="adc-scope" width="260" height="86" aria-label="自动灯 ADC 波形"></canvas></div><div class="adc-footer"><span>阈值待标定</span><span class="lamp unknown">采样待命</span></div></article>
+          <article class="adc-card" data-adc="low"><div class="adc-header"><span>ADC 4 · GPIO0</span><b>低速灯</b></div><div class="adc-value"><strong>—</strong><span>V</span></div><div class="vertical-meter"><canvas class="adc-scope" width="260" height="86" aria-label="低速灯 ADC 波形"></canvas></div><div class="adc-footer"><span>阈值待标定</span><span class="lamp unknown">采样待命</span></div></article>
+          <article class="adc-card" data-adc="medium"><div class="adc-header"><span>ADC 1 · GPIO4</span><b>中速灯</b></div><div class="adc-value"><strong>—</strong><span>V</span></div><div class="vertical-meter"><canvas class="adc-scope" width="260" height="86" aria-label="中速灯 ADC 波形"></canvas></div><div class="adc-footer"><span>阈值待标定</span><span class="lamp unknown">采样待命</span></div></article>
+          <article class="adc-card" data-adc="high"><div class="adc-header"><span>ADC 2 · GPIO3</span><b>高速灯</b></div><div class="adc-value"><strong>—</strong><span>V</span></div><div class="vertical-meter"><canvas class="adc-scope" width="260" height="86" aria-label="高速灯 ADC 波形"></canvas></div><div class="adc-footer"><span>阈值待标定</span><span class="lamp unknown">采样待命</span></div></article>
+          <article class="adc-card" data-adc="auto"><div class="adc-header"><span>ADC 3 · GPIO1</span><b>自动灯</b></div><div class="adc-value"><strong>—</strong><span>V</span></div><div class="vertical-meter"><canvas class="adc-scope" width="260" height="86" aria-label="自动灯 ADC 波形"></canvas></div><div class="adc-footer"><span>阈值待标定</span><span class="lamp unknown">采样待命</span></div></article>
         </div>
+      </section>
+
+      <section class="panel calibration-panel" aria-labelledby="calibration-title">
+        <div class="panel-heading"><div><h2 id="calibration-title">光传感器标定向导 · 第二阶段</h2><p>完整保留原始 ADC；自动识别稳定平台、启动闪烁和四路独立阈值，不控制光耦、不写入设备配置。</p></div><span id="calibration-status" class="tag muted">未开始</span></div>
+        <div class="calibration-controls"><button id="calibration-start">开始自动标定</button><button id="calibration-stop" disabled>停止并生成报告</button><button id="calibration-clear">清空本轮数据</button><span class="calibration-rate">USB：5 ms ADC 采样 / 约 50 帧/秒</span><button id="calibration-csv" disabled>导出原始 CSV</button><button id="calibration-json" disabled>导出原始 JSON</button><button id="calibration-report" disabled>导出分析报告</button></div>
+        <p id="calibration-guidance" class="calibration-guidance">请先安装好 PCB，让设备开机并保持低速。点击开始后低速采样约 3 秒，再按提示切换。</p>
+        <div class="calibration-stage-row"><span>当前阶段 <b id="calibration-stage">未开始</b></span><span>顺序进度 <b id="calibration-progress">0/5</b></span><span>质量 <b id="calibration-quality">—</b></span></div>
+        <p id="calibration-warning" class="calibration-warning"></p><div class="calibration-analysis-wrap"><canvas id="calibration-analysis-scope" width="720" height="112" aria-label="带阶段标记的四路标定波形"></canvas></div>
+        <div class="calibration-stats" aria-label="采样统计"><span>时长 <b id="calibration-duration">—</b></span><span>样本 <b id="calibration-count">0</b></span><span>实收 <b id="calibration-rate-live">0 Hz</b></span><span>序号缺口 <b id="calibration-gaps">USB 无固件序号</b></span></div>
+        <div class="calibration-live"><span>即时电压</span><b id="calibration-now-low">—</b><b id="calibration-now-medium">—</b><b id="calibration-now-high">—</b><b id="calibration-now-auto">—</b></div>
+        <div class="calibration-table-wrap"><table class="calibration-table"><thead><tr><th>#</th><th>本机接收时间</th><th>ADC4 低</th><th>ADC1 中</th><th>ADC2 高</th><th>ADC3 自动</th></tr></thead><tbody id="calibration-rows"><tr><td colspan="6">尚未记录样本。</td></tr></tbody></table></div>
       </section>
 
       <section class="panel outputs-panel">
@@ -74,6 +85,10 @@
     </section>
   </main>
   <div id="toast" role="status"></div>
-  <script src="app.js?v=20260924b"></script>
+  <script src="calibration-sampling.js?v=20261009c"></script>
+  <script src="calibration-analyzer.js?v=20261009d"></script>
+  <script src="calibration-wizard.js?v=20261009c"></script>
+  <script src="lamp-indicator.js?v=20261009d"></script>
+  <script src="app.js?v=20261009c"></script>
 </body>
 </html>

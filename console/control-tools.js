@@ -135,7 +135,7 @@ const menus = {
   ],
   tools: [
     ['↯', '新板自动检测、烧录与验收…', '', () => openEngineering('board')],
-    ['◇', '焊接后外设检查…', '', () => openEngineering('peripheral')], ['▥', 'MQTT 并发压力测试…', '', () => openEngineering('stress')],
+    ['◇', '焊接后外设检查…', '', () => openEngineering('peripheral')], ['◌', '光传感器标定向导…', '', () => openEngineering('calibration')], ['▥', 'MQTT 并发压力测试…', '', () => openEngineering('stress')],
     'separator', ['⌁', 'Wi‑Fi 信号安装助手', '', () => switchWorkspace('wifi')], ['⌁', 'ADC 波形和阈值检查', '', () => switchWorkspace('serial')],
     ['⚙', '工程环境检查…', '', () => openEngineering('environment')],
   ],
@@ -184,9 +184,9 @@ document.querySelectorAll('[data-dialog-close]').forEach(button => button.onclic
 
 const helpPages = {
   architecture: `<h2>系统架构</h2><p>设备使用动态局域网地址，通过不可变设备 ID 在 MQTT 上自报身份；控制服务维护状态、命令、回执和设备目录，三个前端工作区共享同一个服务。</p><div class="architecture-diagram">ESP32-C3 设备\n  ├─ 4 路 ADC / 2 路光耦\n  ├─ Wi‑Fi 2.4 GHz\n  └─ MQTT 状态、心跳、遥测、回执\n              │\n              ▼\n本机 MQTT Broker ── 本机控制服务\n              │\n      ┌───────┼────────┐\n      ▼       ▼        ▼\n  家庭总览  串口调试  Wi‑Fi 调试</div><p>心跳超过 3 秒进入黄色“暂时无响应”，超过 5 秒进入灰色“离线”。红色只表示设备在线但净化器关机。</p>`,
-  pins: `<h2>ESP32-C3 Super Mini 引脚定义</h2><table class="help-table"><tr><th>用途</th><th>GPIO</th><th>说明</th></tr><tr><td>低速灯 ADC</td><td>GPIO4</td><td>TEMT6000 光传感器</td></tr><tr><td>中速灯 ADC</td><td>GPIO3</td><td>TEMT6000 光传感器</td></tr><tr><td>高速灯 ADC</td><td>GPIO1</td><td>TEMT6000 光传感器</td></tr><tr><td>自动灯 ADC</td><td>GPIO0</td><td>TEMT6000 光传感器</td></tr><tr><td>电源光耦</td><td>GPIO5</td><td>模拟电源按键</td></tr><tr><td>模式光耦</td><td>GPIO7</td><td>循环切换模式</td></tr><tr><td>板载蓝灯</td><td>GPIO8</td><td>低电平有效</td></tr></table>`,
+  pins: `<h2>ESP32-C3 Super Mini 引脚定义</h2><table class="help-table"><tr><th>用途</th><th>GPIO / ADC</th><th>说明</th></tr><tr><td>低速灯</td><td>GPIO0 / ADC4</td><td>光敏电阻输入</td></tr><tr><td>中速灯</td><td>GPIO4 / ADC1</td><td>光敏电阻输入</td></tr><tr><td>高速灯</td><td>GPIO3 / ADC2</td><td>光敏电阻输入</td></tr><tr><td>自动灯</td><td>GPIO1 / ADC3</td><td>光敏电阻输入</td></tr><tr><td>电源光耦</td><td>GPIO5</td><td>模拟电源按键</td></tr><tr><td>模式光耦</td><td>GPIO7</td><td>循环切换模式</td></tr><tr><td>板载蓝灯</td><td>GPIO8</td><td>低电平有效</td></tr></table>`,
   status: `<h2>状态与指示灯</h2><table class="help-table"><tr><th>显示</th><th>含义</th></tr><tr><td>蓝灯慢闪</td><td>正在扫描、认证或重试 Wi‑Fi</td></tr><tr><td>蓝灯快闪</td><td>Wi‑Fi 已连接并维持通信</td></tr><tr><td>绿色方灯</td><td>设备在线，心跳不超过 3 秒</td></tr><tr><td>黄色方灯</td><td>暂时无响应，最后信号为 3–5 秒前</td></tr><tr><td>灰色方灯</td><td>设备离线，超过 5 秒无有效状态或心跳</td></tr><tr><td>红色模式灯</td><td>设备在线，但净化器处于关机状态</td></tr></table>`,
-  workflow: `<h2>新板自动烧录验收流程</h2><ol><li>新板不要焊接外设，先用 USB 连接电脑。</li><li>打开“诊断工具 → 新板自动检测、烧录与验收”。</li><li>选择系统标记为 ESP32 的串口，并输入一次目标串口确认文字。</li><li>系统自动完成芯片识别、编译、写入校验、启动检查和 Wi‑Fi/MQTT 联网检查。</li><li>只有五步全部通过才算验收合格；蓝灯快速闪烁表示 Wi‑Fi 已连接。</li><li>合格后再焊接外设，随后执行外设检查。</li></ol>`,
+  workflow: `<h2>新板自动烧录验收流程</h2><ol><li>新板不要焊接外设，先用 USB 连接电脑。</li><li>打开“诊断工具 → 新板自动检测、烧录与验收”。</li><li>确认系统选中标记为 ESP32 的目标串口，点击一次“开始自动检测、烧录并验收”。</li><li>系统自动完成芯片识别、编译、写入校验、启动检查和 Wi-Fi/MQTT 联网检查。</li><li>只有五步全部通过才算验收合格；蓝灯快速闪烁表示 Wi-Fi 已连接。</li><li>合格后再焊接外设，随后执行外设检查。</li></ol>`,
   about: `<h2>关于家庭空气管理控制台</h2><p>用于 ESP32-C3 空气净化器控制器的部署、局域网管理与工程调试。</p><p>界面结构采用 Office 2003 经典菜单、工具栏、资源区和工作区布局；控件采用 Windows 9x/2000 工业软件质感。</p><p>软件版本：0.2 工程控制台<br>通信协议：MQTT air/v1<br>目标板卡：ESP32-C3 Super Mini</p>`,
 };
 
@@ -201,6 +201,7 @@ showHelp('architecture');
 function openEngineering(page) {
   openDialog('engineering-dialog'); showToolPage(page);
   refreshEngineeringEnvironment().catch(error => setShellStatus(error.message));
+  if (page === 'calibration') renderCalibrationHub();
   if (page === 'board') {
     refreshPorts().catch(error => setShellStatus(error.message));
     loadLatestEngineeringJob(false).catch(error => setShellStatus(error.message));
@@ -209,9 +210,27 @@ function openEngineering(page) {
 function showToolPage(page) {
   document.querySelectorAll('[data-tool-page]').forEach(button => button.classList.toggle('active', button.dataset.toolPage === page));
   document.querySelectorAll('[data-tool-content]').forEach(section => section.classList.toggle('active', section.dataset.toolContent === page));
+  if (page === 'calibration') renderCalibrationHub();
 }
 document.querySelectorAll('[data-tool-page]').forEach(button => button.onclick = () => { showToolPage(button.dataset.toolPage); if (button.dataset.toolPage === 'environment') refreshEngineeringEnvironment().catch(error => setShellStatus(error.message)); });
 document.querySelectorAll('[data-command-action]').forEach(button => button.onclick = () => { document.getElementById('engineering-dialog').close(); switchWorkspace(button.dataset.commandAction); });
+document.querySelectorAll('[data-calibration-action]').forEach(button => button.onclick = () => { document.getElementById('engineering-dialog').close(); switchWorkspace(button.dataset.calibrationAction); setShellStatus(`已打开${button.dataset.calibrationAction === 'serial' ? ' USB 串口' : ' Wi‑Fi'}标定向导`); });
+
+function renderCalibrationHub() {
+  const target = document.getElementById('calibration-hub-status');
+  if (!target) return;
+  try {
+    const value = JSON.parse(localStorage.getItem('air-light-calibration-session-status') || 'null');
+    if (!value || value.format !== 'air-light-calibration-status-v1') { target.textContent = '尚未开始本机原始采样。'; return; }
+    const transport = value.transport === 'usb_serial' ? 'USB 串口' : 'Wi‑Fi / MQTT';
+    const duration = Math.max(0, Math.floor(Number(value.duration_ms || 0) / 1000));
+    const elapsed = duration >= 60 ? `${Math.floor(duration / 60)} 分 ${String(duration % 60).padStart(2, '0')} 秒` : `${duration} 秒`;
+    target.textContent = `${transport}${value.active ? '正在记录' : '最近一次记录已停止'} · ${value.device_id || '设备 ID 待识别'} · ${elapsed} · ${Number(value.sample_count || 0).toLocaleString()} 样本 · ${Number(value.received_hz || 0).toFixed(1)} Hz · 序号缺口 ${Number(value.sequence_gaps || 0)}`;
+  } catch (_) { target.textContent = '本机采样状态暂时不可读；可直接打开串口或 Wi‑Fi 采样入口。'; }
+}
+setInterval(() => {
+  if (document.querySelector('[data-tool-content="calibration"]')?.classList.contains('active')) renderCalibrationHub();
+}, 500);
 
 async function refreshPorts() {
   const ports = await toolJson('/tools/ports'), select = document.getElementById('engineering-port');
@@ -368,15 +387,13 @@ async function startEngineeringJob(kind) {
   if (kind === 'provision_board') {
     const safety = await refreshEngineeringSafety();
     if (!safety.port?.likely_esp32) throw new Error('请选择已识别的 ESP32 串口');
-    showEngineeringPreparation(`已锁定目标 ${body.port}。等待最终确认；确认前不会读取或写入板卡。`, '等待确认');
-    const expected = `自动验收并写入 ${body.port}`;
-    const entered = await requestTypedConfirmation(`自动烧录验收将读取芯片身份、编译当前工程、覆盖 ${body.port} 上的程序，并等待它连接家庭 Wi-Fi 与 MQTT。请保持 USB 和供电稳定。`, expected);
-    if (entered === null) { showEngineeringNotStarted('操作者取消了确认。', '已取消'); return; }
-    if (entered !== expected) throw new Error('确认文字不正确，流程没有启动');
-    body.confirmation = entered;
+    showEngineeringPreparation(`已锁定 ESP32 目标 ${body.port}，正在直接启动自动烧录验收……`);
+    // The one-click wizard supplies the backend safety token itself. The
+    // backend still rejects a mismatched port or a non-ESP32 candidate.
+    body.confirmation = `自动验收并写入 ${body.port}`;
   }
   document.querySelectorAll('[data-engineering-job]').forEach(button => { button.disabled = true; });
-  showEngineeringPreparation(`确认完成，正在创建后台任务……\n目标串口：${body.port || '不适用'}`);
+  showEngineeringPreparation(`正在创建后台任务……\n目标串口：${body.port || '不适用'}`);
   currentEngineeringJob = await toolJson('/tools/jobs', { method: 'POST', body: JSON.stringify(body) });
   renderEngineeringJob(currentEngineeringJob); pollEngineeringJob();
 }

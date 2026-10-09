@@ -25,13 +25,34 @@ RUNTIME_ID = uuid4().hex
 CATALOG_PATH = ROOT / "data" / "device_catalog.json"
 DEFAULT_ROOMS = ["客厅", "餐厅", "主卧", "次卧", "书房", "厨房", "玄关 / 走廊"]
 
+def canonical_device_id(value: object) -> str:
+    """Use one immutable identity for both raw-MAC serial and MQTT IDs."""
+    text = str(value or "").strip()[:96]
+    if re.fullmatch(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}", text, re.IGNORECASE):
+        return "pur-" + text.replace(":", "").lower()
+    if re.fullmatch(r"pur-[0-9a-f]{12}", text, re.IGNORECASE):
+        return "pur-" + text[4:].lower()
+    return text
+
+def mac_for_device_id(value: object) -> str | None:
+    text = canonical_device_id(value)
+    match = re.fullmatch(r"pur-([0-9a-f]{12})", text, re.IGNORECASE)
+    if not match: return None
+    raw = match.group(1).upper()
+    return ":".join(raw[index:index + 2] for index in range(0, 12, 2))
+
 def load_catalog() -> dict:
     try:
         data = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+        source_devices = data.get("devices", {})
+        devices = {}
+        if isinstance(source_devices, dict):
+            for device_id, profile in source_devices.items():
+                if isinstance(profile, dict): devices[canonical_device_id(device_id)] = profile
         return {
             "rooms": list(data.get("rooms", DEFAULT_ROOMS)),
             "groups": list(data.get("groups", [])),
-            "devices": dict(data.get("devices", {})),
+            "devices": devices,
         }
     except (OSError, ValueError, TypeError):
         return {"rooms": list(DEFAULT_ROOMS), "groups": [], "devices": {}}
@@ -45,14 +66,111 @@ def save_catalog() -> None:
     temporary.replace(CATALOG_PATH)
 
 def device_profile(device_id: str) -> dict:
+    device_id = canonical_device_id(device_id)
     profile = CATALOG["devices"].setdefault(device_id, {
         "alias": device_id,
         "purifier_number": "",
         "room": "未分配",
         "group_ids": [],
         "hidden": False,
+        "calibration": None,
     })
+    profile.setdefault("calibration", None)
+    # Migrate older saved calibration records on first use.  In particular,
+    # reports produced before the dark-edge safeguard may contain a negative
+    # off threshold; normalizing here prevents a low-noise 0.01 V sample from
+    # being held in the lit state after a service restart.
+    raw_calibration = profile.get("calibration")
+    if isinstance(raw_calibration, dict) and "normalize_calibration_config" in globals():
+        try:
+            normalized = normalize_calibration_config(device_id, raw_calibration)
+            if normalized != raw_calibration:
+                profile["calibration"] = normalized
+                save_catalog()
+        except ValueError:
+            profile["calibration"] = None
     return profile
+
+def normalize_calibration_config(device_id: str, source: object) -> dict:
+    device_id = canonical_device_id(device_id)
+    if not isinstance(source, dict):
+        raise ValueError("calibration config must be an object")
+    source_schema = source.get("schema", source.get("format"))
+    if source_schema not in {"air-light-device-calibration-v1", "air-light-calibration-analysis-v2"}:
+        raise ValueError("unsupported calibration schema")
+    if source.get("overall_status") not in {None, "pass"}:
+        raise ValueError("calibration report is not passed")
+    source_channels = source.get("channels")
+    if isinstance(source_channels, list):
+        source_channels = {str(item.get("channel")): item for item in source_channels if isinstance(item, dict)}
+    if not isinstance(source_channels, dict):
+        raise ValueError("calibration channels are required")
+    channels = {}
+    for key in ("low", "medium", "high", "auto"):
+        item = source_channels.get(key)
+        if not isinstance(item, dict) or item.get("quality") not in {None, "pass"}:
+            raise ValueError(f"calibration channel {key} is not passed")
+        def number(name: str, fallback: float | None = None) -> float | None:
+            value = item.get(name, fallback)
+            if value is None: return fallback
+            try: value = float(value)
+            except (TypeError, ValueError): raise ValueError(f"invalid {key}.{name}")
+            if not (-100_000 <= value <= 100_000): raise ValueError(f"invalid {key}.{name}")
+            return value
+        threshold = number("threshold_mv", item.get("threshold_mv_at_baseline_median"))
+        on_threshold = number("on_threshold_mv", item.get("on_threshold_mv_at_baseline_median", threshold))
+        off_threshold = number("off_threshold_mv", item.get("off_threshold_mv_at_baseline_median", threshold))
+        if threshold is None or on_threshold is None or off_threshold is None:
+            raise ValueError(f"missing thresholds for {key}")
+        direction = "falling" if item.get("direction") == "falling" else "rising"
+        off_median = number("off_median_mv")
+        on_median = number("on_median_mv")
+        off_sigma = number("off_sigma_mv", 0) or 0
+        on_sigma = number("on_sigma_mv", 0) or 0
+        # A calibration made with a wide hysteresis can put the raw off edge
+        # below zero (for example medium: -110 mV).  That is mathematically
+        # valid for a line fit, but unsafe for a physical ADC: every positive
+        # noise sample would then keep an already-lit lamp latched on.  Store a
+        # conservative clear edge at the dark baseline (or threshold when an
+        # older config has no distribution statistics).
+        if direction == "rising":
+            dark_edge = (off_median + max(3 * off_sigma, 2)) if off_median is not None else max(0, threshold)
+            clear_threshold = max(off_threshold, dark_edge)
+            if clear_threshold >= on_threshold: clear_threshold = min(off_threshold, on_threshold - 1)
+        else:
+            dark_edge = (off_median - max(3 * off_sigma, 2)) if off_median is not None else min(3_300, threshold)
+            clear_threshold = min(off_threshold, dark_edge)
+            if clear_threshold <= on_threshold: clear_threshold = max(off_threshold, on_threshold + 1)
+        channels[key] = {
+            "logical_mapping": str(item.get("logical_mapping", ""))[:64],
+            "direction": direction,
+            "off_median_mv": round(off_median, 3) if off_median is not None else None,
+            "on_median_mv": round(on_median, 3) if on_median is not None else None,
+            "off_sigma_mv": round(off_sigma, 3),
+            "on_sigma_mv": round(on_sigma, 3),
+            "delta_mv": round(number("delta_mv", 0) or 0, 3),
+            "effect_size": round(number("effect_size", 0) or 0, 3),
+            "distribution_overlap": round(number("distribution_overlap", 0) or 0, 5),
+            "threshold_mv": round(threshold, 3),
+            "on_threshold_mv": round(on_threshold, 3),
+            "off_threshold_mv": round(off_threshold, 3),
+            "clear_threshold_mv": round(clear_threshold, 3),
+            "hysteresis_mv": round(number("hysteresis_mv", 0) or 0, 3),
+            "quality": "pass",
+        }
+    saved_at = source.get("saved_at_ms")
+    try: saved_at = int(saved_at) if saved_at is not None else int(time.time() * 1000)
+    except (TypeError, ValueError): saved_at = int(time.time() * 1000)
+    return {
+        "schema": "air-light-device-calibration-v1",
+        "device_id": device_id,
+        "mac": mac_for_device_id(device_id),
+        "saved_at_ms": saved_at,
+        "source_format": str(source.get("source_format", source.get("format", "")))[:80],
+        "expected_sequence": [str(value) for value in source.get("expected_sequence", [])][:12],
+        "channels": channels,
+        "quality": dict(source.get("quality", {})) if isinstance(source.get("quality"), dict) else {},
+    }
 
 def public_catalog() -> dict:
     return {
@@ -74,14 +192,20 @@ def restore_catalog(data: object) -> dict:
     devices = {}
     for device_id, source in data.get("devices", {}).items():
         if not isinstance(source, dict): continue
-        key = str(device_id).strip()[:96]
+        key = canonical_device_id(device_id)
         if not key: continue
+        raw_calibration = source.get("calibration")
+        try:
+            calibration = normalize_calibration_config(key, raw_calibration) if isinstance(raw_calibration, dict) else None
+        except ValueError:
+            calibration = None
         devices[key] = {
             "alias": str(source.get("alias", key)).strip()[:64] or key,
             "purifier_number": str(source.get("purifier_number", "")).strip()[:64],
             "room": str(source.get("room", "未分配")).strip()[:64] or "未分配",
             "group_ids": [str(value) for value in source.get("group_ids", []) if str(value) in valid_groups],
             "hidden": bool(source.get("hidden", False)),
+            "calibration": calibration,
         }
     return {"rooms": list(dict.fromkeys(rooms or DEFAULT_ROOMS)), "groups": groups, "devices": devices}
 
@@ -157,6 +281,7 @@ def track_telemetry(record: dict, body: object, observed_at: int) -> None:
             "cursor": cursor,
             "observed_at_ms": observed_at,
             "seq": body.get("seq"),
+            "uptime_ms": body.get("uptime_ms"),
             "adc_mv": body["adc_mv"],
             "opto": body.get("opto", {}),
         })
@@ -188,6 +313,7 @@ def subscribe() -> None:
             try:
                 topic, payload = line.rstrip().split(" ", 1)
                 _, _, device_id, category = topic.split("/", 3)
+                device_id = canonical_device_id(device_id)
                 try:
                     body = json.loads(payload)
                 except json.JSONDecodeError:
@@ -242,7 +368,7 @@ class Handler(BaseHTTPRequestHandler):
         # PC, so explicitly permit the trusted local development console.
         self.send_header("Access-Control-Allow-Origin", "http://localhost:8765")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
         self.end_headers(); self.wfile.write(raw)
     def do_OPTIONS(self) -> None:
         return self.reply(204, {})
@@ -260,11 +386,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/catalog":
             with LOCK: return self.reply(200, public_catalog())
         parts = path.split("/")
+        if len(parts) == 6 and parts[1:4] == ["api", "v1", "devices"] and parts[5] == "calibration":
+            device_id = canonical_device_id(unquote(parts[4]))
+            with LOCK:
+                profile = device_profile(device_id)
+                return self.reply(200, {"device_id": device_id, "config": profile.get("calibration")})
         if len(parts) == 6 and parts[1:4] == ["api", "v1", "devices"] and parts[5] == "telemetry":
+            device_id = canonical_device_id(unquote(parts[4]))
             try: after = max(0, int(parse_qs(parsed.query).get("after", ["0"])[0]))
             except ValueError: after = 0
             with LOCK:
-                record = DEVICES.get(parts[4])
+                record = DEVICES.get(device_id)
                 if record is None: return self.reply(404, {"error": "device not found"})
                 buffered = record.get("_telemetry_payloads", ())
                 values = [dict(sample) for sample in buffered if sample["cursor"] > after]
@@ -338,7 +470,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
             body.setdefault("request_id", uuid4().hex)
-            device_id = parts[4]
+            device_id = canonical_device_id(unquote(parts[4]))
             now = int(time.time() * 1000)
             with LOCK:
                 record = DEVICES.setdefault(device_id, {"device_id": device_id})
@@ -366,12 +498,30 @@ class Handler(BaseHTTPRequestHandler):
                     if item: item.update(status="failed", completed_at_ms=int(time.time() * 1000), error=str(error))
                 return self.reply(503, {"request_id": body["request_id"], "status": "failed", "error": str(error)})
         except Exception as error: return self.reply(400, {"error": str(error)})
+    def do_PUT(self) -> None:
+        parts = urlparse(self.path).path.split("/")
+        if len(parts) != 6 or parts[1:4] != ["api", "v1", "devices"] or parts[5] != "calibration":
+            return self.reply(404, {"error": "not found"})
+        try:
+            body = self.read_json()
+            device_id = canonical_device_id(unquote(parts[4]))
+            source = body.get("config", body)
+            config = normalize_calibration_config(device_id, source)
+            with LOCK:
+                profile = device_profile(device_id)
+                profile["calibration"] = config
+                profile["hidden"] = False
+                save_catalog()
+            return self.reply(200, {"device_id": device_id, "config": config})
+        except Exception as error:
+            return self.reply(400, {"error": str(error)})
+
     def do_PATCH(self) -> None:
         parts = urlparse(self.path).path.split("/")
         if len(parts) != 5 or parts[1:4] != ["api", "v1", "devices"]:
             return self.reply(404, {"error": "not found"})
         try:
-            body = self.read_json(); device_id = parts[4]
+            body = self.read_json(); device_id = canonical_device_id(unquote(parts[4]))
             with LOCK:
                 profile = device_profile(device_id)
                 for key in ("alias", "purifier_number", "room"):
@@ -388,8 +538,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with LOCK:
                 if len(parts) == 5 and parts[1:4] == ["api", "v1", "devices"]:
-                    profile = device_profile(parts[4]); profile["hidden"] = True; save_catalog()
-                    return self.reply(200, {"status": "hidden", "device_id": parts[4]})
+                    device_id = canonical_device_id(unquote(parts[4]))
+                    profile = device_profile(device_id); profile["hidden"] = True; save_catalog()
+                    return self.reply(200, {"status": "hidden", "device_id": device_id})
                 if len(parts) == 5 and parts[1:4] == ["api", "v1", "rooms"]:
                     name = unquote(parts[4])
                     if name in CATALOG["rooms"]: CATALOG["rooms"].remove(name)

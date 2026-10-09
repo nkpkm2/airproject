@@ -14,8 +14,11 @@ constexpr int kBoardLedGpio = BOARD_LED_GPIO;
 constexpr bool kBoardLedActiveLow = BOARD_LED_ACTIVE_LOW != 0;
 
 // Confirmed purifier board mapping. Sensor order follows the physical purifier modes.
-// GPIO4=low, GPIO3=medium, GPIO1=high, GPIO0=auto.
-constexpr int kAdcPins[] = {4, 3, 1, 0};
+// The logical telemetry order remains low / medium / high / auto.  It is
+// deliberately independent of the ADC hardware numbering shown on the PCB:
+// Current purifier wiring: GPIO0 (ADC4)=low, GPIO4 (ADC1)=medium,
+// GPIO3 (ADC2)=high, GPIO1 (ADC3)=auto.
+constexpr int kAdcPins[] = {0, 4, 3, 1};
 constexpr const char* kAdcLabels[] = {"low", "medium", "high", "auto"};
 constexpr size_t kAdcChannelCount = sizeof(kAdcPins) / sizeof(kAdcPins[0]);
 constexpr bool kEnableInternalAdcPulldownForBareBoardTest = false;

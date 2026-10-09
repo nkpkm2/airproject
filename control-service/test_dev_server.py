@@ -23,10 +23,11 @@ class DevServerStateTests(unittest.TestCase):
 
     def test_telemetry_payloads_have_incremental_cursors(self):
         record = {}
-        server.track_telemetry(record, {"seq": 0, "adc_mv": [1, 2, 3, 4]}, 1000)
+        server.track_telemetry(record, {"seq": 0, "uptime_ms": 1234, "adc_mv": [1, 2, 3, 4]}, 1000)
         server.track_telemetry(record, {"seq": 1, "adc_mv": [5, 6, 7, 8]}, 1020)
         payloads = list(record["_telemetry_payloads"])
         self.assertEqual([item["cursor"] for item in payloads], [1, 2])
+        self.assertEqual(payloads[0]["uptime_ms"], 1234)
         self.assertEqual(payloads[-1]["adc_mv"], [5, 6, 7, 8])
 
     def test_new_stream_clears_buffer_but_keeps_cursor_monotonic(self):
@@ -116,6 +117,64 @@ class DeviceCatalogTests(unittest.TestCase):
         self.assertEqual(restored["rooms"], ["客厅"])
         self.assertEqual(restored["groups"][0]["id"], "main-group")
         self.assertEqual(restored["devices"]["pur-test"]["group_ids"], ["main-group"])
+
+    def test_calibration_config_is_normalized_per_device(self):
+        config = server.normalize_calibration_config("30:ED:A0:5B:00:BC", {
+            "schema": "air-light-device-calibration-v1",
+            "overall_status": "pass",
+            "channels": {
+                key: {"logical_mapping": key, "direction": "rising", "threshold_mv": 500 + index,
+                      "on_threshold_mv": 600 + index, "off_threshold_mv": 350 + index,
+                      "hysteresis_mv": 200, "quality": "pass"}
+                for index, key in enumerate(("low", "medium", "high", "auto"))
+            },
+        })
+        self.assertEqual(config["device_id"], "pur-30eda05b00bc")
+        self.assertEqual(set(config["channels"]), {"low", "medium", "high", "auto"})
+        self.assertEqual(config["channels"]["low"]["on_threshold_mv"], 600)
+
+    def test_mac_identity_is_case_insensitive_for_calibration_binding(self):
+        self.assertEqual(
+            server.canonical_device_id("30:ed:a0:5b:00:bc"),
+            "pur-30eda05b00bc",
+        )
+        config = server.normalize_calibration_config("30:ed:a0:5b:00:bc", {
+            "schema": "air-light-device-calibration-v1",
+            "overall_status": "pass",
+            "channels": {
+                key: {"threshold_mv": 500, "on_threshold_mv": 600, "off_threshold_mv": 400, "quality": "pass"}
+                for key in ("low", "medium", "high", "auto")
+            },
+        })
+        self.assertEqual(config["device_id"], "pur-30eda05b00bc")
+        self.assertEqual(config["mac"], "30:ED:A0:5B:00:BC")
+
+    def test_analysis_report_format_is_accepted_for_server_normalization(self):
+        report = {
+            "format": "air-light-calibration-analysis-v2",
+            "overall_status": "pass",
+            "channels": [
+                {"channel": key, "direction": "rising", "threshold_mv_at_baseline_median": 500,
+                 "on_threshold_mv_at_baseline_median": 600, "off_threshold_mv_at_baseline_median": 400,
+                 "quality": "pass"}
+                for key in ("low", "medium", "high", "auto")
+            ],
+        }
+        config = server.normalize_calibration_config("30:ed:a0:5b:00:bc", report)
+        self.assertEqual(config["schema"], "air-light-device-calibration-v1")
+        self.assertEqual(config["device_id"], "pur-30eda05b00bc")
+
+    def test_negative_off_edge_gets_a_safe_clear_edge(self):
+        config = server.normalize_calibration_config("pur-test", {
+            "schema": "air-light-device-calibration-v1",
+            "overall_status": "pass",
+            "channels": {
+                key: {"direction": "rising", "threshold_mv": 52, "on_threshold_mv": 214,
+                      "off_threshold_mv": -110, "quality": "pass"}
+                for key in ("low", "medium", "high", "auto")
+            },
+        })
+        self.assertEqual(config["channels"]["medium"]["clear_threshold_mv"], 52)
 
 
 class EngineeringToolTests(unittest.TestCase):

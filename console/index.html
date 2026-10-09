@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#000080">
   <title>家庭空气管理控制台</title>
-  <link rel="stylesheet" href="control.css?v=20260926a">
+  <link rel="stylesheet" href="control.css?v=20261009a">
 </head>
 <body>
   <header class="application-chrome">
@@ -29,8 +29,8 @@
   </header>
   <main class="control-stage">
     <iframe data-panel="fleet" src="fleet.html?embedded=1&amp;v=20260924e" title="家庭总览"></iframe>
-    <iframe data-panel="serial" src="serial.html?embedded=1&amp;v=20260926n" title="板卡串口调试" allow="serial"></iframe>
-    <iframe data-panel="wifi" src="wifi.html?embedded=1&amp;v=20260926o" title="板卡 Wi-Fi 调试"></iframe>
+    <iframe data-panel="serial" src="serial.html?embedded=1&amp;v=20261009c" title="板卡串口调试" allow="serial"></iframe>
+    <iframe data-panel="wifi" src="wifi.html?embedded=1&amp;v=20261009c" title="板卡 Wi-Fi 调试"></iframe>
   </main>
   <footer class="control-status"><span>就绪</span><span>本机控制服务</span><span>切换工作区不会断开串口或远程调试会话</span></footer>
   <div id="menu-popup" class="menu-popup" hidden></div>
@@ -42,12 +42,13 @@
       <aside class="tool-nav" aria-label="诊断工具分类">
         <button class="active" data-tool-page="board">新板自动烧录验收</button>
         <button data-tool-page="peripheral">焊接后外设检查</button>
+        <button data-tool-page="calibration">光传感器标定向导</button>
         <button data-tool-page="stress">压力测试</button>
         <button data-tool-page="environment">工程环境</button>
       </aside>
       <section class="tool-page active" data-tool-content="board">
         <h2>ESP32-C3 新板自动烧录验收</h2>
-        <p class="dialog-help">选择一块新板并确认一次后，系统自动完成芯片检查、编译、写入校验、固件启动以及 Wi-Fi/MQTT 联网验收。中途任一步失败都会停止，不会跳过后继续。</p>
+        <p class="dialog-help">选择一块新板并点击一次开始后，系统自动完成芯片检查、编译、写入校验、固件启动以及 Wi-Fi/MQTT 联网验收。中途任一步失败都会停止，不会跳过后继续。</p>
         <fieldset><legend>目标板卡</legend><div class="form-row"><label>串口<select id="engineering-port"></select></label><button id="refresh-ports">重新扫描</button></div><div id="port-description" class="inset-box">正在扫描串口…</div></fieldset>
         <div class="tool-actions"><button id="provision-board" data-engineering-job="provision_board" class="danger" disabled>开始自动检测、烧录并验收</button></div>
         <div id="flash-safety" class="inset-box">正在确认目标板卡和工程环境…</div>
@@ -56,7 +57,15 @@
       </section>
       <section class="tool-page" data-tool-content="peripheral">
         <h2>焊接后外设检查</h2><p class="dialog-help">需要万用表或实际照光的步骤由操作者确认，软件不会伪造结果。</p>
-        <div class="wizard-grid"><article><b>四路 ADC 响应</b><p>进入串口调试，观察 GPIO4、GPIO3、GPIO1、GPIO0 的电压与波形。</p><button data-command-action="serial">打开串口调试</button></article><article><b>GPIO5 电源光耦</b><p>分别执行导通、断开与 300 ms 脉冲，并用万用表确认。</p><button data-command-action="serial">打开光耦面板</button></article><article><b>GPIO7 模式光耦</b><p>确认模式控制端在导通和断开时符合电路设计。</p><button data-command-action="serial">打开光耦面板</button></article><article><b>Wi‑Fi 安装角度</b><p>使用实时 RSSI 观察页寻找信号最强的安装方向。</p><button data-command-action="wifi">打开 Wi‑Fi 调试</button></article></div>
+        <div class="wizard-grid"><article><b>四路 ADC 响应</b><p>进入串口调试，观察 GPIO0（低）、GPIO4（中）、GPIO3（高）、GPIO1（自动）的电压与波形。</p><button data-command-action="serial">打开串口调试</button></article><article><b>GPIO5 电源光耦</b><p>分别执行导通、断开与 300 ms 脉冲，并用万用表确认。</p><button data-command-action="serial">打开光耦面板</button></article><article><b>GPIO7 模式光耦</b><p>确认模式控制端在导通和断开时符合电路设计。</p><button data-command-action="serial">打开光耦面板</button></article><article><b>Wi‑Fi 安装角度</b><p>使用实时 RSSI 观察页寻找信号最强的安装方向。</p><button data-command-action="wifi">打开 Wi‑Fi 调试</button></article></div>
+      </section>
+      <section class="tool-page" data-tool-content="calibration">
+        <h2>光传感器标定向导 · 第二阶段</h2>
+        <p class="dialog-help">从 USB 串口或 Wi‑Fi 调试页启动自动向导。设备开机并保持低速后，软件按低 → 中 → 高 → 自动逐档采样，最后提示关机采集暗态；不会控制光耦或写入设备配置。</p>
+        <fieldset><legend>操作顺序</legend><ol class="checklist compact-checklist"><li>安装好 PCB，开机并调到低速，点击“开始自动标定”。</li><li>低速自动采样约 3 秒；随后按一次实体风速键切到中速。</li><li>每次切档后软件自动采样约 3 秒，再提示切到下一档。</li><li>完成自动档后按电源键关机，等待四盏灯稳定熄灭并导出报告。</li></ol></fieldset>
+        <div class="calibration-tool-actions"><button data-calibration-action="serial">打开 USB 标定向导</button><button data-calibration-action="wifi">打开 Wi‑Fi 标定向导</button></div>
+        <div id="calibration-hub-status" class="calibration-hub-status">尚未开始本机原始采样。</div>
+        <p class="dialog-help">系统不要求固定每档停留时间，也不要求网页确认切换。启动阶段四路共同漂移和约 800–900 ms 的自动灯闪烁会被单独标记，不会直接作为自动档。</p>
       </section>
       <section class="tool-page" data-tool-content="stress">
         <h2>MQTT 并发压力测试</h2><p class="dialog-help">生成临时虚拟设备遥测，测量 Broker 接受速率。消息只进入 air/loadtest/v1，不会进入真实设备目录，也不会发送控制命令或保留消息。</p>
@@ -89,6 +98,6 @@
     <div class="dialog-buttons"><button id="engineering-confirm-cancel">取消</button><button id="engineering-confirm-accept" disabled>确认并开始</button></div>
   </dialog>
   <script src="control.js?v=20260924b"></script>
-  <script src="control-tools.js?v=20260926c"></script>
+  <script src="control-tools.js?v=20261009c"></script>
 </body>
 </html>

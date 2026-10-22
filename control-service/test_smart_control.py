@@ -26,6 +26,16 @@ class SmartControlTests(unittest.TestCase):
         self.assertTrue(action["inflight"]["restart_recovery"])
         self.assertIn("重启后", action["status"])
 
+    def test_restarted_pulse_requires_a_new_matching_online_lamp_report(self):
+        inflight = {"expected": "medium", "sent_at_ms": 1_000}
+        self.assertEqual(server.restarted_pulse_recovery(inflight, "medium", 999, True, 2_000), "wait")
+        self.assertEqual(server.restarted_pulse_recovery(inflight, "medium", 1_001, False, 2_000), "wait")
+        self.assertEqual(server.restarted_pulse_recovery(inflight, "low", 1_001, True, 2_000), "wait")
+        self.assertEqual(server.restarted_pulse_recovery(inflight, "medium", 1_001, True, 2_000), "confirmed")
+        self.assertEqual(server.restarted_pulse_recovery(inflight, "low", 1_001, True, 13_001), "uncertain")
+        self.assertEqual(server.restarted_pulse_recovery({"sent_at_ms": "bad"}, "low", 2_000, True, 3_000),
+                         "uncertain")
+
     def test_smart_runtime_checkpoint_persists_intent_but_not_ephemeral_queue_or_weather(self):
         runtime = {"weather": {"current": {"temperature_2m": 15}},
                    "device_actions": {"pur-test": {

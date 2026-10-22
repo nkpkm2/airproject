@@ -91,6 +91,20 @@ def recover_smart_runtime_after_restart(runtime: dict) -> None:
 
 recover_smart_runtime_after_restart(SMART_RUNTIME)
 
+def restarted_pulse_recovery(inflight: dict, current_mode: str, state_seen_ms: int,
+                             online: bool, now_ms: int) -> str:
+    """Return confirmed, wait, or uncertain without replaying a physical pulse."""
+    try:
+        sent_at_ms = int(inflight.get("sent_at_ms", now_ms))
+        observed_at_ms = int(state_seen_ms or 0)
+        expected = inflight.get("expected")
+    except (TypeError, ValueError):
+        return "uncertain"
+    matches = expected == current_mode or (expected == "active" and current_mode in smart_control.MODES)
+    if online and observed_at_ms > sent_at_ms and matches:
+        return "confirmed"
+    return "uncertain" if now_ms - sent_at_ms > 12_000 else "wait"
+
 def canonical_device_id(value: object) -> str:
     """Use one immutable identity for both raw-MAC serial and MQTT IDs."""
     text = str(value or "").strip()[:96]
@@ -630,17 +644,15 @@ def smart_controller_loop() -> None:
                     inflight = action_state.get("inflight")
                     if inflight:
                         if inflight.get("restart_recovery"):
-                            sent_at_ms = int(inflight.get("sent_at_ms", now_ms))
-                            fresh_state = int(record.get("_state_seen_ms", 0)) > sent_at_ms
-                            expected_mode = inflight.get("expected")
-                            expected_seen = (expected_mode == current_mode or
-                                             (expected_mode == "active" and current_mode in smart_control.MODES))
-                            if state == "online" and fresh_state and expected_seen:
+                            recovery = restarted_pulse_recovery(
+                                inflight, current_mode, record.get("_state_seen_ms", 0),
+                                state == "online", now_ms)
+                            if recovery == "confirmed":
                                 action_state.update(inflight=None, last_success_at_ms=now_ms,
                                                     failure_count=0, paused=False, error="",
                                                     status="服务重启后已确认上次操作")
                                 inflight = None
-                            elif now_ms - sent_at_ms > 12_000:
+                            elif recovery == "uncertain":
                                 action_state.update(inflight=None, paused=True,
                                                     status="重启期间按键结果不确定；请核对灯态后保存设置恢复",
                                                     error="为避免重复按键，未自动重发结果不确定的控制命令")

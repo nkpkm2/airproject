@@ -171,6 +171,16 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         social = 0
         reasons.append("社交/过敏讨论信号缺少有效时间戳、已超过 12 小时或时间异常，已忽略")
 
+    # Weather is refreshed every 15 minutes, but a failed refresh intentionally
+    # leaves the last good payload available for diagnostics. Never let that
+    # cached payload influence control indefinitely: after one hour (or if the
+    # timestamp is missing/implausibly in the future), treat it as unavailable.
+    if weather:
+        weather_age = fresh_age_seconds(weather.get("fetched_at_ms"), 60 * 60)
+        if weather_age is None:
+            weather = None
+            reasons.append("天气数据缺少有效抓取时间、已超过 60 分钟或时间异常，天气信号已忽略")
+
     if official_signal:
         fetched_age = fresh_age_seconds(official_signal.get("fetched_at_ms"), 2 * 3600)
         published_age = fresh_age_seconds(official_signal.get("published_at_ms"), 48 * 3600)
@@ -301,7 +311,8 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     return {"score": score, "forecast_score_6h": forecast_score, "tier": tier, "forecast_tier_6h": forecast_tier,
             "tier_label": {"weak": "弱", "normal": "正常", "high": "高", "extreme": "极高"}[tier],
             "reasons": reasons, "evening_boost": evening, "preboost_active": preboost, "as_of": now_local.isoformat(),
-            "sources": {"official_pollen": official_source, "weather": "Open-Meteo weather forecast" if weather else "unavailable",
+            "sources": {"official_pollen": official_source,
+                        "weather": "Open-Meteo weather forecast" if weather else "unavailable_or_stale",
                         "social": "operator_entry"}}
 
 

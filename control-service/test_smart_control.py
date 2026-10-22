@@ -204,15 +204,19 @@ class SmartControlTests(unittest.TestCase):
     def test_weather_and_social_cannot_claim_extreme_without_official_pollen(self):
         config = smart.normalize_config({"social_level": 3})
         weather = {"current": {"temperature_2m": 15, "precipitation": 0, "cloud_cover": 10},
+                   "fetched_at_ms": int(datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp() * 1000),
                    "daily": {"sunshine_duration_s": [36000] * 4, "precipitation_sum_mm": [0] * 4}}
         risk = smart.assess(config, weather, datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai")))
         self.assertNotEqual(risk["tier"], "extreme")
 
     def test_rain_is_bounded_suppression_and_official_level_remains_primary(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
-        config = smart.normalize_config({"official_level": 2})
-        dry = {"current": {"temperature_2m": 15, "precipitation": 0, "cloud_cover": 10}}
-        wet = {"current": {"temperature_2m": 15, "precipitation": 2, "cloud_cover": 90}}
+        config = smart.normalize_config({"official_level": 2, "official_updated_at": int(now.timestamp() * 1000)})
+        fetched_at_ms = int(now.timestamp() * 1000)
+        dry = {"current": {"temperature_2m": 15, "precipitation": 0, "cloud_cover": 10},
+               "fetched_at_ms": fetched_at_ms}
+        wet = {"current": {"temperature_2m": 15, "precipitation": 2, "cloud_cover": 90},
+               "fetched_at_ms": fetched_at_ms}
         self.assertGreater(smart.assess(config, dry, now)["score"], smart.assess(config, wet, now)["score"])
         self.assertGreaterEqual(smart.assess(config, wet, now)["score"], 0)
 
@@ -222,23 +226,41 @@ class SmartControlTests(unittest.TestCase):
         current = {"temperature_2m": 15, "precipitation": 0, "cloud_cover": 80}
         times = ["2026-03-28", "2026-03-29", "2026-03-30", "2026-03-31", "2026-04-01",
                  "2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05"]
-        rain_then_sun = {"current": current, "daily": {"time": times,
+        fetched_at_ms = int(now.timestamp() * 1000)
+        rain_then_sun = {"current": current, "fetched_at_ms": fetched_at_ms, "daily": {"time": times,
             "sunshine_duration_s": [0, 0, 0, 0, 25200, 36000, 36000, 36000, 36000],
             "precipitation_sum_mm": [0, 0, 0, 12, 0, 0, 0, 0, 0]}}
-        no_recent_rain = {"current": current, "daily": {"time": times,
+        no_recent_rain = {"current": current, "fetched_at_ms": fetched_at_ms, "daily": {"time": times,
             "sunshine_duration_s": [0, 0, 0, 0, 25200, 36000, 36000, 36000, 36000],
             "precipitation_sum_mm": [0] * 9}}
         wet_clear = smart.assess(config, rain_then_sun, now)
         clear_only = smart.assess(config, no_recent_rain, now)
         self.assertEqual(wet_clear["score"], clear_only["score"] + 3)
 
-        past_streak = {"current": current, "daily": {"time": times,
+        past_streak = {"current": current, "fetched_at_ms": fetched_at_ms, "daily": {"time": times,
             "sunshine_duration_s": [36000] * 9, "precipitation_sum_mm": [0] * 9}}
-        future_only = {"current": current, "daily": {"time": times,
+        future_only = {"current": current, "fetched_at_ms": fetched_at_ms, "daily": {"time": times,
             "sunshine_duration_s": [0, 0, 0, 0, 36000, 36000, 36000, 36000, 36000],
             "precipitation_sum_mm": [0] * 9}}
         self.assertEqual(smart.assess(config, past_streak, now)["score"],
                          smart.assess(config, future_only, now)["score"] - 3)
+
+    def test_stale_missing_or_future_weather_timestamp_is_ignored(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({"official_level": 2, "official_updated_at": int(now.timestamp() * 1000)})
+        current_rain = {"current": {"temperature_2m": 15, "precipitation": 10, "cloud_cover": 90}}
+        fresh = dict(current_rain, fetched_at_ms=int(now.timestamp() * 1000))
+        stale = dict(current_rain, fetched_at_ms=int((now.timestamp() - 61 * 60) * 1000))
+        future = dict(current_rain, fetched_at_ms=int((now.timestamp() + 6 * 60) * 1000))
+
+        baseline = smart.assess(config, None, now)
+        self.assertLess(smart.assess(config, fresh, now)["score"], baseline["score"])
+        for invalid in (current_rain, stale, future):
+            with self.subTest(timestamp=invalid.get("fetched_at_ms")):
+                result = smart.assess(config, invalid, now)
+                self.assertEqual(result["score"], baseline["score"])
+                self.assertEqual(result["sources"]["weather"], "unavailable_or_stale")
+                self.assertTrue(any("天气数据" in reason for reason in result["reasons"]))
 
     def test_weather_fetch_requests_and_preserves_four_days_of_daily_history(self):
         class Response:

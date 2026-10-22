@@ -10,15 +10,16 @@ The current public pollen APIs have country/plant coverage limits: Open-Meteo's 
 
 The controller calculates an explainable 0–100 score:
 
-- Official/local Cupressaceae forecast is primary: level 0/1/2/3 starts at 0/12/45/72 points.
+- Official/local Cupressaceae forecast is primary: configured level 0/1/2/3/4 starts at 0/12/30/52/72 points.
 - Current/forecast rain, temperature, cloud cover and sunshine can change the score by at most 12 points. The weather request retains four past daily observations as well as the near forecast: rain today suppresses the score, warm/sunny weather is a modest increase, a rainy previous day followed by warm sunshine gets only a +3-point contextual adjustment, and four observed sunny/dry days get a −3-point lagged adjustment. Future sunny days are never treated as pollen depletion that has already happened. These are bounded heuristics, not a biological pollen model.
+- Weather is polled every 15 minutes and is ignored after 60 minutes, or if its fetch timestamp is missing or more than five minutes in the future. A failed refresh may retain the last payload for diagnostics, but the timestamp guard prevents stale weather from affecting the score.
 - Social/allergy chatter adds at most 12 points. It cannot on its own produce a high or extreme decision.
 - Configured annual local season adds 4 monitoring points only. It never claims that pollen was measured.
 - An official expected peak within the configured lead window requests one extra tier of pre-ramp.
 - The configured 17:10 window (40 minutes by default) raises the score to at least “normal.”
 - After high/extreme risk, a linear tail contributes up to 18 points over the configured indoor residual period (18 h by default). Lower risk is accepted only after a 90-minute dwell.
 
-Score bands are weak `<18`, normal `18–41`, high `42–67`, extreme `≥68`; weather/social/season alone are prevented from classifying extreme. Upward transitions are immediate; downshifts wait 90 minutes. The outdoor pollen signal is not a direct indoor sensor, so results are recommendations, not medical advice.
+Score bands are weak `<18`, normal `18–41`, high `42–67`, extreme `≥68`; weather/social/season alone are prevented from classifying extreme. Current score includes bounded weather suppression; the six-hour forecast tier may pre-ramp but is never allowed to lower today's tier. Upward transitions are immediate; downshifts wait 90 minutes. The outdoor pollen signal is not a direct indoor sensor, so results are recommendations, not medical advice.
 
 ## Fan target and physical actuation
 

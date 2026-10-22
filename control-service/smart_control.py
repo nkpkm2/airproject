@@ -366,6 +366,7 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     local_clock = now_local.timetz().replace(tzinfo=None)
     elapsed_min = (local_clock.hour * 60 + local_clock.minute) - (start.hour * 60 + start.minute)
     evening = 0 <= elapsed_min < int(config.get("evening_minutes", 40))
+    score_before_evening = score
     if evening:
         score = max(score, 35)
         reasons.append("下班回家时段增强已生效（开始时间及持续时间可配置）")
@@ -451,6 +452,12 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     else: tier = "extreme"
     if tier == "extreme" and official < 2:
         tier = "high"  # weather/social chatter alone can never claim extreme pollen
+    if score_before_evening < 18: tier_before_evening = "weak"
+    elif score_before_evening < 42: tier_before_evening = "normal"
+    elif score_before_evening < 68: tier_before_evening = "high"
+    else: tier_before_evening = "extreme"
+    if tier_before_evening == "extreme" and official < 2:
+        tier_before_evening = "high"
     forecast_tier = "weak" if forecast_score < 18 else "normal" if forecast_score < 42 else "high" if forecast_score < 68 else "extreme"
     if preboost:
         rank = {name: index for index, name in enumerate(LEVELS)}
@@ -462,7 +469,8 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             "forecast_weather_adjustment": forecast_weather_adjustment,
             "forecast_components": forecast_components,
             "weather_context_active": weather_context_active,
-            "reasons": reasons, "evening_boost": evening, "preboost_active": preboost,
+            "reasons": reasons, "evening_boost": evening,
+            "tier_before_evening": tier_before_evening, "preboost_active": preboost,
             "residual_active": residual_active, "residual_remaining_hours": round(residual_remaining_h, 2),
             "as_of": now_local.isoformat(),
             "sources": {"official_pollen": official_source,
@@ -642,4 +650,20 @@ def apply_hysteresis(current: str, candidate: str, candidate_since: float,
             return desired, desired, now_s
         return current, candidate, candidate_since
     return current, desired, now_s
+
+
+def end_evening_boost(current: str, candidate: str, candidate_since: float,
+                      desired: str, base_tier: str | None, residual_active: bool,
+                      now_s: float) -> tuple[str, str, float, bool]:
+    """End a schedule-only normal boost on time without shortening pollen dwell.
+
+    The fixed homecoming boost is a one-time daily window, not a noisy sensor.
+    If that window alone lifted weak to normal, let it end at its configured
+    boundary. Any independently elevated tier or indoor residual still uses
+    the ordinary 90-minute hysteresis.
+    """
+    if (base_tier == "weak" and current == "normal" and desired == "weak"
+            and not residual_active):
+        return desired, desired, now_s, True
+    return current, candidate, candidate_since, False
 

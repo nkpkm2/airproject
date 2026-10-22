@@ -747,6 +747,35 @@ class SmartControlTests(unittest.TestCase):
         current, candidate, since = smart.apply_hysteresis(current, candidate, since, "normal", 5_420)
         self.assertEqual(current, "normal")
 
+    def test_evening_only_boost_ends_on_schedule_without_bypassing_pollen_dwell(self):
+        start = datetime(2026, 4, 1, 17, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({"evening_start": "17:10", "evening_minutes": 40})
+        active_risk = smart.assess(config, None, start)
+        self.assertTrue(active_risk["evening_boost"])
+        self.assertEqual(active_risk["tier_before_evening"], "weak")
+        current, candidate, since = smart.apply_hysteresis(
+            "weak", "weak", 0, smart.desired_tier(active_risk), 100)
+        self.assertEqual(current, "normal")
+
+        end = datetime(2026, 4, 1, 17, 50, tzinfo=ZoneInfo("Asia/Shanghai"))
+        ended_risk = smart.assess(config, None, end)
+        self.assertFalse(ended_risk["evening_boost"])
+        desired = smart.desired_tier(ended_risk)
+        ended = smart.end_evening_boost(current, candidate, since, desired,
+                                        active_risk["tier_before_evening"], False, 2_500)
+        self.assertEqual(ended, ("weak", "weak", 2_500, True))
+
+        # If pollen or indoor residual already justified normal, keep the
+        # ordinary dwell rather than treating it as schedule-only.
+        protected = smart.end_evening_boost("normal", "weak", 1_000, "weak",
+                                            "normal", False, 2_500)
+        residual = smart.end_evening_boost("normal", "weak", 1_000, "weak",
+                                           "weak", True, 2_500)
+        self.assertEqual(protected[:3], ("normal", "weak", 1_000))
+        self.assertFalse(protected[3])
+        self.assertEqual(residual[:3], ("normal", "weak", 1_000))
+        self.assertFalse(residual[3])
+
     def test_noisy_hourly_pollen_signal_does_not_chatter_across_risk_tiers(self):
         effective, candidate, candidate_since = "weak", "weak", 0.0
         transitions = []

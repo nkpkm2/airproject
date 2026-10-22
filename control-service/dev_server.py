@@ -73,6 +73,8 @@ SMART_RUNTIME.setdefault("last_peak_at", 0)
 SMART_RUNTIME.setdefault("effective_tier", "weak")
 SMART_RUNTIME.setdefault("candidate_tier", "weak")
 SMART_RUNTIME.setdefault("candidate_since", 0)
+SMART_RUNTIME.setdefault("evening_boost_active", False)
+SMART_RUNTIME.setdefault("evening_boost_base_tier", None)
 SMART_RUNTIME.setdefault("device_actions", {})
 SMART_RUNTIME.setdefault("last_error", "")
 
@@ -633,8 +635,23 @@ def smart_controller_loop() -> None:
             current = SMART_RUNTIME.get("effective_tier", "weak")
             candidate = SMART_RUNTIME.get("candidate_tier", current)
             candidate_since = float(SMART_RUNTIME.get("candidate_since", 0))
+            evening_was_active = bool(SMART_RUNTIME.get("evening_boost_active", False))
+            if risk["evening_boost"] and not evening_was_active:
+                tier_rank = {name: index for index, name in enumerate(smart_control.LEVELS)}
+                pre_evening = risk.get("tier_before_evening", "weak")
+                SMART_RUNTIME["evening_boost_base_tier"] = max(
+                    (current, pre_evening), key=lambda name: tier_rank.get(name, 0))
+            elif not risk["evening_boost"] and evening_was_active:
+                current, candidate, candidate_since, _ = smart_control.end_evening_boost(
+                    current, candidate, candidate_since, desired,
+                    SMART_RUNTIME.get("evening_boost_base_tier"),
+                    bool(risk.get("residual_active")), now_s)
+                SMART_RUNTIME["evening_boost_base_tier"] = None
+            SMART_RUNTIME["evening_boost_active"] = bool(risk["evening_boost"])
             # Escalation is prompt; reduction requires 90 minutes of persistent
-            # lower risk, preserving indoor cleanup after outdoor peaks.
+            # lower risk, preserving indoor cleanup after outdoor peaks. The
+            # single scheduled homecoming window is allowed to end on time only
+            # when it alone lifted the tier and no residual floor remains.
             effective, next_candidate, next_candidate_since = smart_control.apply_hysteresis(
                 current, candidate, candidate_since, desired, now_s)
             SMART_RUNTIME["effective_tier"] = effective

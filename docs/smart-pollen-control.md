@@ -22,7 +22,7 @@ The controller calculates an explainable 0–100 score:
 - Social/allergy chatter adds at most 12 points. It cannot on its own produce a high or extreme decision.
 - Configured annual local season adds 4 monitoring points only. It never claims that pollen was measured.
 - An official expected peak within the configured lead window requests one extra tier of pre-ramp.
-- The configured 17:10 window (40 minutes by default) raises the score to at least “normal.”
+- The configured 17:10 window (40 minutes by default) raises the score to at least “normal.” If this schedule alone lifted a weak tier, it can end at its configured boundary; when pollen risk or the indoor-residual floor independently requires a higher tier, the ordinary 90-minute downshift dwell still applies.
 - After high/extreme risk, a linear tail contributes up to 18 points over the configured indoor residual period (18 h by default). While that tail is active, it explicitly holds the target tier at least at normal even after its numeric score falls below the normal band; the timer is anchored to the last current/forecast high-risk sample, not to the hysteresis-delayed effective tier. Lower risk is accepted only after a 90-minute dwell.
 
 Score bands are weak `<18`, normal `18–41`, high `42–67`, extreme `≥68`; weather/social/season alone are prevented from classifying extreme. Current score includes bounded weather suppression; the six-hour forecast tier may pre-ramp but is never allowed to lower today's tier. Upward transitions are immediate; downshifts wait 90 minutes. The outdoor pollen signal is not a direct indoor sensor, so results are recommendations, not medical advice.

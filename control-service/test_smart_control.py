@@ -213,6 +213,30 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(parsed_ongoing["predicted_peak_at"], "2026-03-17T10:00:00+08:00")
         self.assertEqual(parsed_ongoing["predicted_peak_until"], "2026-03-21T10:00:00+08:00")
 
+        official_page_excerpt = (
+            "<p>日期：2026-03-17 16:07 来源：北京市疾病预防控制中心</p>"
+            "<p>据最新预警信息，3月17日至21日，北京大部分地区柏科花粉将陆续达到浓度高峰日，"
+            "每日10:00-17:00更是全天花粉浓度最高时段。</p>"
+        )
+        parsed_real_wording = smart.parse_official_pollen_page(
+            official_page_excerpt, datetime(2026, 3, 17, 17, tzinfo=ZoneInfo("Asia/Shanghai")))
+        self.assertEqual(parsed_real_wording["level"], 3)
+        self.assertEqual(parsed_real_wording["predicted_peak_at"], "2026-03-17T10:00:00+08:00")
+        self.assertEqual(parsed_real_wording["predicted_peak_until"], "2026-03-21T10:00:00+08:00")
+
+    def test_annual_pollen_season_handles_calendar_year_rollover(self):
+        config = smart.normalize_config({"season_start_md": "11-15", "season_end_md": "02-15"})
+        in_season_dates = ("2026-11-20T12:00:00+08:00", "2027-01-05T12:00:00+08:00",
+                           "2027-02-15T12:00:00+08:00")
+        out_of_season_dates = ("2026-11-14T12:00:00+08:00", "2027-02-16T12:00:00+08:00",
+                               "2027-06-01T12:00:00+08:00")
+        for value in in_season_dates:
+            with self.subTest(date=value):
+                self.assertEqual(smart.assess(config, None, datetime.fromisoformat(value))["score"], 4)
+        for value in out_of_season_dates:
+            with self.subTest(date=value):
+                self.assertEqual(smart.assess(config, None, datetime.fromisoformat(value))["score"], 0)
+
     def test_official_page_fetch_is_limited_to_https_gov_cn(self):
         self.assertEqual(server.validate_official_pollen_url("https://www.beijing.gov.cn/a/b.html"),
                          "https://www.beijing.gov.cn/a/b.html")

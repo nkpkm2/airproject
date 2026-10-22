@@ -95,6 +95,12 @@ class SmartControlTests(unittest.TestCase):
         self.assertIn("不等于颗粒物 CADR", result["warning"])
         self.assertFalse(result["high_meets_15x_nominal"])
         self.assertIn("低于 15 次/小时", result["capacity_caveat"])
+        self.assertEqual(result["minimum_high_devices_for_15x"], 40)
+        self.assertEqual(result["minimum_high_devices_for_20x"], 54)
+        selected = smart.house_capacity(smart.normalize_config({"baselines": {"pur-a": "low", "pur-b": "auto"}}))
+        self.assertEqual(selected["baselined_device_count"], 2)
+        self.assertEqual(selected["baselined_airflow_m3h"], 20)
+        self.assertEqual(selected["auto_baseline_devices_unrated"], 1)
 
     def test_official_pollen_page_parser_requires_fresh_cupressaceae_evidence(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -144,6 +150,19 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(result["source_url"], opener.response.geturl())
         self.assertEqual(opener.response.read_limit, 500_001)
         self.assertEqual(opener.timeout, 8)
+
+    def test_background_official_refresh_discards_result_after_source_changes(self):
+        config = smart.default_config(); config["official_url"] = "https://www.beijing.gov.cn/a"
+        runtime = {"official_pollen": None, "official_pollen_error": ""}
+        result = {"level": 3, "source_url": config["official_url"]}
+        with patch.object(server, "SMART_CONFIG", config), patch.object(server, "SMART_RUNTIME", runtime), \
+                patch.object(server, "fetch_official_pollen", return_value=result):
+            server._refresh_official_pollen(config)
+            self.assertEqual(runtime["official_pollen"], result)
+            changed = dict(config, official_url="https://www.example.org/not-allowed")
+            with patch.object(server, "fetch_official_pollen", return_value={"level": 4, "source_url": config["official_url"]}):
+                server._refresh_official_pollen(changed)
+            self.assertEqual(runtime["official_pollen"], result)
 
     def test_automatic_official_signal_overrides_manual_only_when_fresh(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))

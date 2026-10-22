@@ -514,6 +514,31 @@ def publish_control_command(device_id: str, command_type: str, origin: str = "sm
             if found: found.update(status="failed", completed_at_ms=int(time.time() * 1000), error=str(error))
         return False, str(error)
 
+def _refresh_smart_weather(config: dict) -> None:
+    try:
+        value = fetch_smart_weather(config)
+        with LOCK:
+            if (SMART_CONFIG.get("latitude"), SMART_CONFIG.get("longitude")) == (config.get("latitude"), config.get("longitude")):
+                SMART_RUNTIME["weather"] = value
+                SMART_RUNTIME["weather_error"] = ""
+    except Exception as error:
+        with LOCK:
+            if (SMART_CONFIG.get("latitude"), SMART_CONFIG.get("longitude")) == (config.get("latitude"), config.get("longitude")):
+                SMART_RUNTIME["weather_error"] = str(error)[:240]
+
+def _refresh_official_pollen(config: dict) -> None:
+    source_url = str(config.get("official_url") or "").strip()
+    try:
+        value = fetch_official_pollen(config)
+        with LOCK:
+            if str(SMART_CONFIG.get("official_url") or "").strip() == source_url:
+                SMART_RUNTIME["official_pollen"] = value
+                SMART_RUNTIME["official_pollen_error"] = ""
+    except Exception as error:
+        with LOCK:
+            if str(SMART_CONFIG.get("official_url") or "").strip() == source_url:
+                SMART_RUNTIME["official_pollen_error"] = str(error)[:240]
+
 def smart_controller_loop() -> None:
     last_save = 0.0
     while True:
@@ -523,29 +548,17 @@ def smart_controller_loop() -> None:
             weather = SMART_RUNTIME.get("weather")
             fetched_at = float(SMART_RUNTIME.get("weather_fetched_at", 0))
         if config.get("latitude") is not None and config.get("longitude") is not None and now_s - fetched_at >= 900:
-            try:
-                value = fetch_smart_weather(config)
-                with LOCK:
-                    SMART_RUNTIME["weather"] = value
+            with LOCK:
+                if now_s - float(SMART_RUNTIME.get("weather_fetched_at", 0)) >= 900:
                     SMART_RUNTIME["weather_fetched_at"] = now_s
-                    SMART_RUNTIME["weather_error"] = ""
-            except Exception as error:
-                with LOCK:
-                    SMART_RUNTIME["weather_error"] = str(error)[:240]
-                    SMART_RUNTIME["weather_fetched_at"] = now_s
+                    threading.Thread(target=_refresh_smart_weather, args=(config,), daemon=True).start()
         pollen_url = str(config.get("official_url") or "").strip()
         pollen_fetched_at = float(SMART_RUNTIME.get("official_pollen_fetched_at", 0))
         if pollen_url and now_s - pollen_fetched_at >= 3600:
-            try:
-                value = fetch_official_pollen(config)
-                with LOCK:
-                    SMART_RUNTIME["official_pollen"] = value
+            with LOCK:
+                if now_s - float(SMART_RUNTIME.get("official_pollen_fetched_at", 0)) >= 3600:
                     SMART_RUNTIME["official_pollen_fetched_at"] = now_s
-                    SMART_RUNTIME["official_pollen_error"] = ""
-            except Exception as error:
-                with LOCK:
-                    SMART_RUNTIME["official_pollen_error"] = str(error)[:240]
-                    SMART_RUNTIME["official_pollen_fetched_at"] = now_s
+                    threading.Thread(target=_refresh_official_pollen, args=(config,), daemon=True).start()
         with LOCK:
             weather = SMART_RUNTIME.get("weather")
             pollen_signal = SMART_RUNTIME.get("official_pollen")

@@ -115,11 +115,20 @@ def house_capacity(config: dict[str, Any]) -> dict[str, Any]:
     count = int(config["device_count"])
     rates = config["airflow_m3h"]
     totals = {mode: count * float(rates[mode]) for mode in ("low", "medium", "high")}
+    baselines = config.get("baselines", {})
+    baseline_airflow = sum(float(rates[mode]) for mode in baselines.values() if mode in rates)
+    auto_baselines = sum(1 for mode in baselines.values() if mode == "auto")
+    high_rate = float(rates["high"])
     return {
         "volume_m3": round(volume, 1),
         "total_airflow_m3h": {key: round(value, 1) for key, value in totals.items()},
         "nominal_air_changes_per_hour": {key: math.floor(value / volume * 100 + 0.5) / 100 if volume else 0 for key, value in totals.items()},
         "target_15x_m3h": round(volume * 15, 1), "target_20x_m3h": round(volume * 20, 1),
+        "minimum_high_devices_for_15x": math.ceil(volume * 15 / high_rate) if high_rate > 0 else None,
+        "minimum_high_devices_for_20x": math.ceil(volume * 20 / high_rate) if high_rate > 0 else None,
+        "baselined_device_count": len(baselines),
+        "baselined_airflow_m3h": round(baseline_airflow, 1),
+        "auto_baseline_devices_unrated": auto_baselines,
         "high_meets_15x_nominal": totals["high"] >= volume * 15,
         "high_meets_20x_nominal": totals["high"] >= volume * 20,
         "capacity_caveat": ("标称总风量低于 15 次/小时目标；且实际 CADR 通常不高于风量，不能据此宣称满足该洁净目标。"

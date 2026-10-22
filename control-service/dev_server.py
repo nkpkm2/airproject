@@ -1,7 +1,7 @@
 """Dependency-free local MQTT control service for Windows development."""
 from __future__ import annotations
 
-import json, os, re, subprocess, sys, threading, time
+import json, os, re, subprocess, sys, threading, time, urllib.parse, urllib.request
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -11,6 +11,7 @@ from uuid import uuid4
 ROOT = Path(__file__).parent
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 from engineering_tools import environment_report, serial_ports, tools as engineering_tools
+import smart_control
 ENV = dict(line.split("=", 1) for line in (ROOT / ".env").read_text(encoding="utf-8-sig").splitlines() if "=" in line)
 MQTT = Path(r"C:\Program Files\mosquitto")
 DEVICES: dict[str, dict] = {}
@@ -23,9 +24,45 @@ MAX_PENDING_COMMANDS = 3
 MAX_COMMAND_HISTORY = 50
 RUNTIME_ID = uuid4().hex
 CATALOG_PATH = ROOT / "data" / "device_catalog.json"
+SMART_PATH = ROOT / "data" / "smart-control.json"
+SMART_RUNTIME_PATH = ROOT / "data" / "smart-control-runtime.json"
 DEFAULT_ROOMS = ["客厅", "餐厅", "主卧", "次卧", "书房", "厨房", "玄关 / 走廊"]
 LAMP_KEYS = ("low", "medium", "high", "auto")
 LAMP_INDEX = {key: index for index, key in enumerate(LAMP_KEYS)}
+
+def load_smart_config() -> dict:
+    try: return smart_control.normalize_config(json.loads(SMART_PATH.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError): return smart_control.default_config()
+
+def save_smart_config() -> None:
+    SMART_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = SMART_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(SMART_CONFIG, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(SMART_PATH)
+
+def load_smart_runtime() -> dict:
+    try:
+        value = json.loads(SMART_RUNTIME_PATH.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError): return {}
+
+def save_smart_runtime() -> None:
+    SMART_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = SMART_RUNTIME_PATH.with_suffix(".tmp")
+    safe = {key: value for key, value in SMART_RUNTIME.items() if key != "weather"}
+    temporary.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(SMART_RUNTIME_PATH)
+
+SMART_CONFIG = load_smart_config()
+SMART_RUNTIME = load_smart_runtime()
+SMART_RUNTIME.setdefault("weather", None)
+SMART_RUNTIME.setdefault("weather_fetched_at", 0)
+SMART_RUNTIME.setdefault("last_peak_at", 0)
+SMART_RUNTIME.setdefault("effective_tier", "weak")
+SMART_RUNTIME.setdefault("candidate_tier", "weak")
+SMART_RUNTIME.setdefault("candidate_since", 0)
+SMART_RUNTIME.setdefault("device_actions", {})
+SMART_RUNTIME.setdefault("last_error", "")
 
 def canonical_device_id(value: object) -> str:
     """Use one immutable identity for both raw-MAC serial and MQTT IDs."""
@@ -312,6 +349,257 @@ def safe_group_id(name: str) -> str:
 def mqtt_args(exe: str) -> list[str]:
     return [str(MQTT / exe), "-h", ENV["MQTT_HOST"], "-p", ENV["MQTT_PORT"], "-u", ENV["MQTT_USERNAME"], "-P", ENV["MQTT_PASSWORD"]]
 
+def fetch_smart_weather(config: dict) -> dict:
+    """Fetch bounded public weather context; it is never presented as pollen data."""
+    query = urllib.parse.urlencode({
+        "latitude": config["latitude"], "longitude": config["longitude"],
+        "current": "temperature_2m,precipitation,cloud_cover,wind_speed_10m",
+        "hourly": "temperature_2m,precipitation_probability,cloud_cover,wind_speed_10m",
+        "daily": "precipitation_sum,sunshine_duration", "forecast_days": 4,
+        "timezone": config.get("timezone", "Asia/Shanghai"),
+    })
+    request = urllib.request.Request(
+        f"https://api.open-meteo.com/v1/forecast?{query}",
+        headers={"User-Agent": "AirProject-SmartControl/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    current = body.get("current", {})
+    hourly = body.get("hourly", {})
+    daily = body.get("daily", {})
+    if not isinstance(current, dict) or not isinstance(hourly, dict) or not isinstance(daily, dict):
+        raise ValueError("天气服务返回的数据格式不正确")
+    return {
+        "current": current,
+        "hourly": {"time": hourly.get("time", [])[:72],
+                   "temperature_2m": hourly.get("temperature_2m", [])[:72],
+                   "precipitation_probability": hourly.get("precipitation_probability", [])[:72],
+                   "cloud_cover": hourly.get("cloud_cover", [])[:72],
+                   "wind_speed_10m": hourly.get("wind_speed_10m", [])[:72]},
+        "daily": {"time": daily.get("time", [])[:4],
+                  "precipitation_sum_mm": daily.get("precipitation_sum", [])[:4],
+                  "sunshine_duration_s": daily.get("sunshine_duration", [])[:4]},
+        "timezone": body.get("timezone", config.get("timezone")),
+        "fetched_at_ms": int(time.time() * 1000),
+        "attribution": "Open-Meteo weather forecast; not a Cupressaceae pollen forecast",
+    }
+
+def geocode_smart_location(query: str) -> list[dict]:
+    query = query.strip()[:120]
+    if len(query) < 2: raise ValueError("请输入至少两个字的城市/地区名")
+    params = urllib.parse.urlencode({"name": query, "count": 6, "language": "zh", "format": "json"})
+    request = urllib.request.Request(f"https://geocoding-api.open-meteo.com/v1/search?{params}",
+                                     headers={"User-Agent": "AirProject-SmartControl/1.0"})
+    with urllib.request.urlopen(request, timeout=8) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    results = []
+    for item in body.get("results", [])[:6]:
+        label = " · ".join(str(item.get(key, "")).strip() for key in ("name", "admin1", "country") if item.get(key))
+        if isinstance(item.get("latitude"), (int, float)) and isinstance(item.get("longitude"), (int, float)):
+            results.append({"label": label, "latitude": item["latitude"], "longitude": item["longitude"],
+                            "timezone": item.get("timezone") or "Asia/Shanghai"})
+    return results
+
+def smart_snapshot() -> dict:
+    with LOCK:
+        config = json.loads(json.dumps(SMART_CONFIG))
+        runtime = json.loads(json.dumps(SMART_RUNTIME))
+        visible = []
+        now = int(time.time() * 1000)
+        for device_id in dict.fromkeys([*DEVICES, *CATALOG["devices"]]):
+            record = DEVICES.get(device_id, {"device_id": device_id})
+            profile = device_profile(device_id)
+            if profile.get("hidden"): continue
+            baseline = config["baselines"].get(device_id)
+            derived = derive_lamp_state(record, profile, now)
+            channels = (profile.get("calibration") or {}).get("channels", {})
+            calibrated = isinstance(channels, dict) and all(isinstance(channels.get(key), dict) and channels[key].get("quality") == "pass" for key in LAMP_KEYS)
+            current = derived.get("mode", "unknown")
+            target = smart_control.target_mode(baseline, runtime.get("effective_tier", "weak"), config["strength"]) if baseline else None
+            visible.append({
+                "device_id": device_id,
+                "alias": profile.get("alias", device_id),
+                "room": profile.get("room", "未分配"),
+                "connection_state": classify_connection(record, now)[0],
+                "current_mode": current,
+                "baseline_mode": baseline,
+                "target_mode": target,
+                "calibrated": calibrated,
+                "action": runtime.get("device_actions", {}).get(device_id, {}),
+            })
+        return {
+            "config": config,
+            "enabled": bool(config["enabled"]),
+            "risk": smart_control.assess(config, runtime.get("weather"), previous_peak_at=runtime.get("last_peak_at") or None),
+            "capacity": smart_control.house_capacity(config),
+            "weather": runtime.get("weather"),
+            "weather_error": runtime.get("weather_error", ""),
+            "effective_tier": runtime.get("effective_tier", "weak"),
+            "devices": visible,
+            "updated_at_ms": now,
+        }
+
+def publish_control_command(device_id: str, command_type: str, origin: str = "smart_control") -> tuple[bool, str]:
+    request_id = uuid4().hex
+    now = int(time.time() * 1000)
+    body = {"request_id": request_id, "type": command_type}
+    with LOCK:
+        record = DEVICES.get(device_id)
+        if record is None: return False, "device_not_found"
+        expire_commands(record, now)
+        pending = [item for item in record.get("commands", []) if item.get("status") in {"sending", "pending"}]
+        if pending: return False, "command_in_flight"
+        item = {"request_id": request_id, "type": command_type, "origin": origin,
+                "status": "sending", "sent_at_ms": now}
+        record.setdefault("commands", []).append(item)
+        record["commands"] = record["commands"][-MAX_COMMAND_HISTORY:]
+    try:
+        subprocess.run(mqtt_args("mosquitto_pub.exe") + ["-t", f"air/v1/{device_id}/command", "-m", json.dumps(body), "-q", "1"],
+                       check=True, capture_output=True, timeout=5)
+        with LOCK:
+            found = command_for(DEVICES.get(device_id, {}), request_id)
+            if found: found.update(status="pending", published_at_ms=int(time.time() * 1000))
+        return True, request_id
+    except Exception as error:
+        with LOCK:
+            found = command_for(DEVICES.get(device_id, {}), request_id)
+            if found: found.update(status="failed", completed_at_ms=int(time.time() * 1000), error=str(error))
+        return False, str(error)
+
+def smart_controller_loop() -> None:
+    last_save = 0.0
+    while True:
+        now_s = time.time()
+        with LOCK:
+            config = json.loads(json.dumps(SMART_CONFIG))
+            weather = SMART_RUNTIME.get("weather")
+            fetched_at = float(SMART_RUNTIME.get("weather_fetched_at", 0))
+        if config.get("latitude") is not None and config.get("longitude") is not None and now_s - fetched_at >= 900:
+            try:
+                value = fetch_smart_weather(config)
+                with LOCK:
+                    SMART_RUNTIME["weather"] = value
+                    SMART_RUNTIME["weather_fetched_at"] = now_s
+                    SMART_RUNTIME["weather_error"] = ""
+            except Exception as error:
+                with LOCK:
+                    SMART_RUNTIME["weather_error"] = str(error)[:240]
+                    SMART_RUNTIME["weather_fetched_at"] = now_s
+        with LOCK:
+            weather = SMART_RUNTIME.get("weather")
+            risk = smart_control.assess(config, weather, previous_peak_at=SMART_RUNTIME.get("last_peak_at") or None)
+            rank = {name: index for index, name in enumerate(smart_control.LEVELS)}
+            desired = max(risk["tier"], risk["forecast_tier_6h"], key=lambda item: rank[item])
+            current = SMART_RUNTIME.get("effective_tier", "weak")
+            candidate = SMART_RUNTIME.get("candidate_tier", current)
+            candidate_since = float(SMART_RUNTIME.get("candidate_since", 0))
+            # Escalation is prompt; reduction requires 90 minutes of persistent
+            # lower risk, preserving indoor cleanup after outdoor peaks.
+            effective, next_candidate, next_candidate_since = smart_control.apply_hysteresis(
+                current, candidate, candidate_since, desired, now_s)
+            SMART_RUNTIME["effective_tier"] = effective
+            SMART_RUNTIME["candidate_tier"] = next_candidate
+            SMART_RUNTIME["candidate_since"] = next_candidate_since
+            effective = SMART_RUNTIME.get("effective_tier", "weak")
+            if effective in {"high", "extreme"}:
+                SMART_RUNTIME["last_peak_at"] = now_s
+            now_ms = int(now_s * 1000)
+            action_map = SMART_RUNTIME.setdefault("device_actions", {})
+            control_ids = set(action_map)
+            if config.get("enabled"): control_ids.update(config.get("baselines", {}))
+            for device_id in control_ids:
+                    record = DEVICES.get(device_id)
+                    profile = CATALOG["devices"].get(device_id, {})
+                    baseline = config["baselines"].get(device_id)
+                    action_state = action_map.setdefault(device_id, {})
+                    if not record or profile.get("hidden"): continue
+                    manual_target = action_state.get("manual_target_mode")
+                    manual_until = int(action_state.get("manual_target_until_ms", 0))
+                    if manual_target and now_ms >= manual_until:
+                        action_state.update(manual_target_mode=None, manual_target_until_ms=0,
+                                            status="手动目标已过期，未完成调整")
+                        manual_target = None
+                    if not manual_target and (not config.get("enabled") or not baseline): continue
+                    channels = (profile.get("calibration") or {}).get("channels", {})
+                    if not isinstance(channels, dict) or not all(isinstance(channels.get(key), dict) and channels[key].get("quality") == "pass" for key in LAMP_KEYS):
+                        action_state.update(status="需完成光传感器标定")
+                        continue
+                    state, _ = classify_connection(record, now_ms)
+                    derived = derive_lamp_state(record, profile, now_ms)
+                    current_mode = derived.get("mode", "unknown")
+                    inflight = action_state.get("inflight")
+                    if inflight:
+                        prior_command = command_for(record, str(inflight.get("request_id", ""))) if inflight.get("request_id") else None
+                        if prior_command and prior_command.get("status") in {"failed", "timeout"}:
+                            failures = int(action_state.get("failure_count", 0)) + 1
+                            paused = failures >= 3
+                            action_state.update(inflight=None, failure_count=failures, paused=paused,
+                                                status="连续失败，已暂停" if paused else "命令失败，稍后再试",
+                                                error=prior_command.get("result") or prior_command.get("error") or "设备命令失败")
+                            continue
+                        if inflight.get("expected") == current_mode or (inflight.get("expected") == "active" and current_mode in smart_control.MODES):
+                            action_state.update(inflight=None, last_success_at_ms=now_ms, failure_count=0, paused=False, error="")
+                        elif now_ms - int(inflight.get("sent_at_ms", now_ms)) > 12_000:
+                            failures = int(action_state.get("failure_count", 0)) + 1
+                            paused = failures >= 3
+                            action_state.update(inflight=None, failure_count=failures, paused=paused,
+                                                status="连续失败，已暂停" if paused else "灯态未变化，稍后再试",
+                                                error="命令已回执但灯态未按预期变化")
+                        else:
+                            continue
+                    if not manual_target and now_ms < int(action_state.get("manual_override_until_ms", 0)):
+                        action_state["status"] = "手动控制优先（暂缓自动调整）"
+                        continue
+                    if action_state.get("paused"):
+                        action_state["status"] = "连续命令失败，已暂停；修改设置后可恢复"
+                        continue
+                    if state != "online" or current_mode in {"unknown", "uninstalled"}:
+                        action_state["status"] = "等待在线且灯态可判定"
+                        continue
+                    target = manual_target or smart_control.target_mode(baseline, effective, config.get("strength", "high"))
+                    if target == current_mode:
+                        if manual_target:
+                            action_state.update(manual_target_mode=None, manual_target_until_ms=0,
+                                                status=f"手动目标已达到：{smart_control.MODE_LABELS[target]}", error="")
+                        else: action_state.update(status="已达到目标", target_mode=target, error="")
+                        continue
+                    last_sent = int(action_state.get("last_sent_at_ms", 0))
+                    if now_ms - last_sent < 1_700: continue
+                    command = smart_control.next_physical_step(current_mode, target)
+                    if not command: continue
+                    if command == "opto.power.pulse":
+                        expected = "off" if current_mode != "off" else "active"
+                    else:
+                        expected = smart_control.MODES[(smart_control.MODES.index(current_mode) + 1) % len(smart_control.MODES)]
+                    action_state.update(status="正在调节", target_mode=target, last_sent_at_ms=now_ms,
+                                        inflight={"expected": expected, "sent_at_ms": now_ms, "command": command})
+                    # Queue outside the service lock below; remember one action
+                    # per iteration to keep MQTT and device keys from contending.
+                    action_state["queue_command"] = command
+                    action_state["queue_origin"] = "manual_target" if manual_target else "smart_control"
+            if now_s - last_save >= 30:
+                save_smart_runtime()
+                last_save = now_s
+            queued = [(device_id, action.get("queue_command"), action.get("queue_origin", "smart_control"))
+                      for device_id, action in SMART_RUNTIME.get("device_actions", {}).items() if action.get("queue_command")][:5]
+            for device_id, _, _ in queued:
+                action = SMART_RUNTIME["device_actions"][device_id]
+                action.pop("queue_command", None)
+                action.pop("queue_origin", None)
+        for item in queued:
+            device_id, command, origin = item
+            ok, result = publish_control_command(device_id, command, origin)
+            with LOCK:
+                action = SMART_RUNTIME["device_actions"].setdefault(device_id, {})
+                if ok:
+                    action.setdefault("inflight", {})["request_id"] = result
+                else:
+                    failures = int(action.get("failure_count", 0)) + 1
+                    paused = failures >= 3
+                    action.update(inflight=None, failure_count=failures, paused=paused,
+                                  status="连续失败，已暂停" if paused else "等待后重试", error=result)
+        time.sleep(5)
+
 def command_for(record: dict, request_id: str) -> dict | None:
     return next((item for item in record.get("commands", []) if item.get("request_id") == request_id), None)
 
@@ -469,6 +757,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path); path = parsed.path
         if path == "/health": return self.reply(200, {"status": "ok", "runtime": "stdlib"})
+        if path == "/api/v1/smart-control/geocode":
+            try: return self.reply(200, {"results": geocode_smart_location(parse_qs(parsed.query).get("q", [""])[0])})
+            except Exception as error: return self.reply(400, {"error": str(error)})
+        if path == "/api/v1/smart-control": return self.reply(200, smart_snapshot())
         if path == "/api/v1/tools/environment": return self.reply(200, environment_report())
         if path == "/api/v1/tools/ports": return self.reply(200, serial_ports())
         if path == "/api/v1/tools/safety":
@@ -536,6 +828,36 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        target_parts = path.split("/")
+        if len(target_parts) == 6 and target_parts[1:4] == ["api", "v1", "devices"] and target_parts[5] == "target":
+            try:
+                body = self.read_json(); target = str(body.get("mode", ""))
+                if target not in (*smart_control.MODES, "off"):
+                    return self.reply(400, {"error": "mode must be off, low, medium, high, or auto"})
+                device_id = canonical_device_id(unquote(target_parts[4])); now = int(time.time() * 1000)
+                with LOCK:
+                    record = DEVICES.get(device_id)
+                    profile = CATALOG["devices"].get(device_id, {})
+                    if not record or profile.get("hidden"): return self.reply(404, {"error": "device not found"})
+                    connection, _ = classify_connection(record, now)
+                    derived = derive_lamp_state(record, profile, now)
+                    current_mode = derived.get("mode", "unknown")
+                    channels = (profile.get("calibration") or {}).get("channels", {})
+                    calibrated = isinstance(channels, dict) and all(isinstance(channels.get(key), dict) and channels[key].get("quality") == "pass" for key in LAMP_KEYS)
+                    if connection != "online": return self.reply(409, {"error": "device is not online"})
+                    if not calibrated or current_mode in {"unknown", "uninstalled"}:
+                        return self.reply(409, {"error": "device needs a passed light calibration and a readable lamp state"})
+                    action = SMART_RUNTIME.setdefault("device_actions", {}).setdefault(device_id, {})
+                    if current_mode == target:
+                        action.update(manual_target_mode=None, manual_target_until_ms=0, status=f"已处于{smart_control.MODE_LABELS[target]}")
+                        return self.reply(200, {"status": "already_at_target", "device_id": device_id, "mode": target})
+                    action.update(manual_target_mode=target, manual_target_until_ms=now + 5 * 60 * 1000,
+                                  manual_override_until_ms=now + 30 * 60 * 1000,
+                                  status=f"手动目标：{smart_control.MODE_LABELS[target]}，等待逐步确认")
+                return self.reply(202, {"status": "accepted", "device_id": device_id, "mode": target,
+                                        "detail": "每次只触发一个已确认的实体按键动作"})
+            except Exception as error:
+                return self.reply(400, {"error": str(error)})
         if path == "/api/v1/tools/jobs":
             try: return self.reply(202, engineering_tools.start(self.read_json()))
             except Exception as error: return self.reply(400, {"error": str(error)})
@@ -576,11 +898,16 @@ class Handler(BaseHTTPRequestHandler):
                 item = {
                     "request_id": body["request_id"],
                     "type": body.get("type", "unknown"),
+                    "origin": "manual",
                     "status": "sending",
                     "sent_at_ms": now,
                 }
                 record.setdefault("commands", []).append(item)
                 record["commands"] = record["commands"][-MAX_COMMAND_HISTORY:]
+                SMART_RUNTIME.setdefault("device_actions", {}).setdefault(device_id, {}).update(
+                    manual_override_until_ms=now + 30 * 60 * 1000,
+                    status="手动控制优先（30 分钟内暂缓智能调控）",
+                )
             try:
                 subprocess.run(mqtt_args("mosquitto_pub.exe") + ["-t", f"air/v1/{device_id}/command", "-m", json.dumps(body), "-q", "1"], check=True, capture_output=True)
                 with LOCK:
@@ -594,6 +921,33 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply(503, {"request_id": body["request_id"], "status": "failed", "error": str(error)})
         except Exception as error: return self.reply(400, {"error": str(error)})
     def do_PUT(self) -> None:
+        if urlparse(self.path).path == "/api/v1/smart-control":
+            try:
+                body = self.read_json()
+                config = smart_control.normalize_config(body)
+                with LOCK:
+                    previous = SMART_CONFIG
+                    if any(config.get(key) != previous.get(key) for key in ("official_level", "official_note", "official_url", "official_peak_at")) or (config["official_level"] and not config.get("official_updated_at")):
+                        config["official_updated_at"] = int(time.time() * 1000)
+                    if any(config.get(key) != previous.get(key) for key in ("social_level", "social_note")) or (config["social_level"] and not config.get("social_updated_at")):
+                        config["social_updated_at"] = int(time.time() * 1000)
+                    if config["enabled"]:
+                        calibrated = False
+                        for device_id in config["baselines"]:
+                            profile = CATALOG["devices"].get(device_id, {})
+                            channels = (profile.get("calibration") or {}).get("channels", {})
+                            if not profile.get("hidden") and isinstance(channels, dict) and all(isinstance(channels.get(key), dict) and channels[key].get("quality") == "pass" for key in LAMP_KEYS):
+                                calibrated = True; break
+                        if not config["baselines"] or not calibrated:
+                            raise ValueError("启用前至少要为一台已完成四路光传感器标定的设备设置基准档位")
+                    SMART_CONFIG.clear(); SMART_CONFIG.update(config); save_smart_config()
+                    SMART_RUNTIME["weather_fetched_at"] = 0
+                    SMART_RUNTIME["last_config_error"] = ""
+                    for action in SMART_RUNTIME.setdefault("device_actions", {}).values():
+                        if isinstance(action, dict): action.update(paused=False, failure_count=0, error="")
+                return self.reply(200, smart_snapshot())
+            except Exception as error:
+                return self.reply(400, {"error": str(error)})
         parts = urlparse(self.path).path.split("/")
         if len(parts) != 6 or parts[1:4] != ["api", "v1", "devices"] or parts[5] != "calibration":
             return self.reply(404, {"error": "not found"})
@@ -660,4 +1014,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     threading.Thread(target=subscribe, daemon=True).start()
+    threading.Thread(target=smart_controller_loop, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", 8780), Handler).serve_forever()

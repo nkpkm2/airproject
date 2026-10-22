@@ -4,7 +4,7 @@ if (new URLSearchParams(location.search).has('embedded')) document.body.classLis
 
 const keys = ['low', 'medium', 'high', 'auto'];
 const adcPinLabels = { low: 'ADC 4 · GPIO0', medium: 'ADC 1 · GPIO4', high: 'ADC 2 · GPIO3', auto: 'ADC 3 · GPIO1' };
-const labels = {'led.blink':'闪烁蓝色 LED','debug.configure':'调整 ADC 调试流','device.reboot':'远程重启板卡','opto.power.on':'电源光耦导通','opto.power.off':'电源光耦断开','opto.mode.pulse':'模式光耦脉冲',unknown:'未知命令'};
+const labels = {'led.blink':'闪烁蓝色 LED','debug.configure':'调整 ADC 调试流','device.reboot':'远程重启板卡','opto.power.on':'电源光耦导通','opto.power.off':'电源光耦断开','opto.power.pulse':'电源按键脉冲','opto.mode.pulse':'模式光耦脉冲',unknown:'未知命令'};
 const $ = id => document.getElementById(id);
 const state = {selected:'',devices:[],catalog:{rooms:[],groups:[],devices:{}},view:localStorage.getItem('air-device-tree-view')||'all',histories:Object.fromEntries(keys.map(key=>[key,Array(140).fill(0)])),streamHz:0,measuredHz:0,telemetryAt:0,telemetryDevice:'',telemetryRuntime:'',telemetryCursor:0,telemetryBusy:false,commands:[],stressRunning:false,directorySignature:'',folderPrefs:JSON.parse(localStorage.getItem('air-device-tree-folders')||'{}'),calibrationDevice:'',calibrationHz:0,calibrationStarting:false,calibrationKeepalive:null};
 const calibration = CalibrationSampling.create({

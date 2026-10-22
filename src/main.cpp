@@ -187,6 +187,7 @@ void handleMqttCommand(const char* data, int length) {
   if (type == "led.blink") { blinkLed(3, 200, 200); publishAck(requestId, "ok"); }
   else if (type == "opto.power.on") { setOptocoupler(0, true); publishAck(requestId, "ok"); }
   else if (type == "opto.power.off") { setOptocoupler(0, false); publishAck(requestId, "ok"); }
+  else if (type == "opto.power.pulse") { pulseOptocoupler(0); publishAck(requestId, "ok"); }
   else if (type == "opto.mode.pulse") { pulseOptocoupler(1); publishAck(requestId, "ok"); }
   else if (type == "device.reboot") {
     // Give the QoS 1 acknowledgement enough time to leave the MQTT outbox

@@ -2,7 +2,7 @@ import importlib.util
 import unittest
 from collections import deque
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 MODULE_PATH = Path(__file__).with_name("dev_server.py")
@@ -294,9 +294,13 @@ class EngineeringToolTests(unittest.TestCase):
         process_results = [(0, ["MAC: 30:ed:a0:5b:00:bc"]), (0, ["build ok"]), (0, ["upload ok"])]
         runtime = {"device_id": "pur-30eda05b00bc", "ip": "192.168.1.10", "rssi_dbm": -55,
             "boot_verified": True, "wifi_verified": True, "mqtt_verified": True, "blue_led_expected": "fast_blink"}
+        module_globals = server.environment_report.__globals__
+        firmware = Mock(); firmware.exists.return_value = True; firmware.stat.return_value.st_size = 128
         with patch.object(self.tools, "_recheck_before_run"), patch.object(self.tools, "_wait_for_same_port"), \
                 patch.object(self.tools, "_execute_process", side_effect=process_results), \
-                patch.object(self.tools, "_verify_firmware_runtime", return_value=runtime):
+                patch.object(self.tools, "_verify_firmware_runtime", return_value=runtime), \
+                patch.dict(module_globals, {"FIRMWARE": firmware, "_file_sha256": lambda _: "a" * 64,
+                                            "source_fingerprint": lambda: "stable-source"}):
             self.tools._run_provision(job_id, job)
         self.assertEqual(job["status"], "succeeded")
         self.assertTrue(job["result"]["accepted"])

@@ -375,6 +375,18 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(parsed_phenology["predicted_peak_until"], "2026-04-10T23:59:59+08:00")
         self.assertEqual(parsed_phenology["peak_time_precision"], "approximate_month_decade_10_local")
 
+        # For official ranges, use the lower bound rather than accidentally
+        # matching the upper endpoint as a standalone level.
+        for band, expected_level in (("1到2级", 1), ("2至3级", 2),
+                                     ("3到4级", 3), ("4-5级", 4)):
+            with self.subTest(official_level_band=band):
+                band_page = (
+                    "<p>发布日期：2026年4月1日</p>"
+                    f"<p>柏科花粉浓度为{band}，属于区间预报。</p>"
+                )
+                parsed_band = smart.parse_official_pollen_page(band_page, now)
+                self.assertEqual(parsed_band["level"], expected_level)
+
     def test_official_peak_window_keeps_recent_multiday_forecast_valid_through_its_end(self):
         config = smart.normalize_config({})
         published = datetime(2026, 3, 17, 16, 7, tzinfo=ZoneInfo("Asia/Shanghai"))

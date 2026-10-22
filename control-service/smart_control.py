@@ -690,8 +690,14 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
     if not positions:
         raise ValueError("公告未明确提到柏科/侧柏，避免把杂草花粉误当柏花粉")
     context = " … ".join(text[max(0, index - 300):min(len(text), index + 1_200)] for index in positions[:4])
-    if _has_unnegated_phrase(r"极高|爆表|非常高|\b(?:4|5)\s*级\b|4\s*(?:到|至|[-~～])\s*5\s*级", context): level = 4
-    elif _has_unnegated_phrase(r"高峰|高浓度|浓度(?:较)?高|水平较高|高风险|\b3\s*级\b|3\s*(?:到|至|[-~～])\s*4\s*级", context): level = 3
+    numeric_range = re.search(r"(?<!\d)([1-5])\s*级?\s*(?:到|至|[-~～])\s*([1-5])\s*级", context)
+    if numeric_range and _has_unnegated_phrase(re.escape(numeric_range.group(0)), context):
+        # Do not promote a band such as “3到4级（中等到高级别）” to its
+        # upper endpoint; choose the lower bound to avoid overreacting to an
+        # interval that explicitly includes less severe days/areas.
+        level = min(4, min(int(numeric_range.group(1)), int(numeric_range.group(2))))
+    elif _has_unnegated_phrase(r"极高|爆表|非常高|\b(?:4|5)\s*级\b", context): level = 4
+    elif _has_unnegated_phrase(r"高峰|高浓度|浓度(?:较)?高|水平较高|高风险|\b3\s*级\b", context): level = 3
     elif _has_unnegated_phrase(r"中等|中度|\b2\s*级\b|适中", context): level = 2
     elif _has_unnegated_phrase(r"低浓度|较低|偏低|\b1\s*级\b|低风险", context): level = 1
     else: raise ValueError("公告提到柏科但没有可判读的浓度级别/高峰信息")

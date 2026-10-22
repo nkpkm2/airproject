@@ -482,11 +482,21 @@ class SmartControlTests(unittest.TestCase):
                     "predicted_peak_at": peak_at.isoformat(),
                     "predicted_peak_until": (peak_at + smart.timedelta(days=1)).isoformat()}
 
-        days_ahead = smart.assess(config, None, published, official_signal=signal_for(published))
+        sunny_weather = {"fetched_at_ms": int(published.timestamp() * 1000),
+            "timezone": "Asia/Shanghai",
+            "current": {"temperature_2m": 20, "relative_humidity_2m": 25,
+                "precipitation": 0, "interval": 900, "cloud_cover": 0},
+            "hourly": {"time": ["2026-04-01T13:00", "2026-04-01T14:00", "2026-04-01T15:00",
+                                 "2026-04-01T16:00", "2026-04-01T17:00", "2026-04-01T18:00", "2026-04-01T19:00"],
+                "temperature_2m": [20] * 7, "relative_humidity_2m": [25] * 7,
+                "precipitation_probability": [0] * 7, "cloud_cover": [0] * 7}}
+        days_ahead = smart.assess(config, sunny_weather, published, official_signal=signal_for(published))
         self.assertEqual(days_ahead["score"], 0)
         self.assertEqual(days_ahead["tier"], "weak")
         self.assertEqual(days_ahead["official_forecast_level"], 4)
         self.assertFalse(days_ahead["preboost_active"])
+        self.assertFalse(days_ahead["weather_context_active"],
+                         "a pollen peak several days away must not activate today's weather modifiers")
 
         before_peak = peak_at - smart.timedelta(minutes=30)
         preboost = smart.assess(config, None, before_peak, official_signal=signal_for(before_peak))

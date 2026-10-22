@@ -378,10 +378,14 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     else:
         reasons.append("尚未录入当地柏科花粉预报；季节和天气不能单独证明空气中花粉浓度")
 
-    weather_context_active = in_season or official > 0 or official_forecast_level > 0 or social > 0
+    # A distant forecast bulletin belongs only to the forecast lane. It must
+    # not turn today's sunny/warm weather into a present-risk boost before the
+    # declared peak or its lead window; current weather needs a current pollen
+    # season, a live level, or a fresh reviewed symptom trend.
+    weather_context_active = in_season or official > 0 or social > 0
     weather_score = 0.0
     if weather and not weather_context_active:
-        reasons.append("天气背景未计入花粉风险：尚无当地花粉季、有效柏科预报或有效人工趋势信号")
+        reasons.append("天气背景未计入当前花粉风险：未来高峰公告不会提前充当当前浓度；需处于本地花粉季或有当前有效柏科/人工趋势信号")
     if weather and weather_context_active and isinstance(weather.get("current"), dict):
         current = weather["current"]
         temp = _bounded_weather_number(current.get("temperature_2m"), -90, 60)

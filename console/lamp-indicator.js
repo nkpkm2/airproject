@@ -17,6 +17,11 @@
   function channelConfig(config, key) {
     return config?.channels?.[key] || null;
   }
+  function finiteOrNull(value) {
+    if (value == null || value === '') return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
   function evaluate(config, key, mv, previous = 'unknown') {
     const channel = channelConfig(config, key);
     if (!channel || channel.quality && channel.quality !== 'pass') return { state: 'unknown', text: '未标定' };
@@ -32,25 +37,25 @@
     // fitted edge can never latch a lamp on at 0–10 mV.  Older configs without
     // distribution fields fall back to the calibrated threshold and still get
     // the same non-negative safety floor.
-    const offMedian = Number(channel.off_median_mv);
+    const offMedian = finiteOrNull(channel.off_median_mv);
     const offSigma = Math.max(0, Number(channel.off_sigma_mv) || 0);
-    const onMedian = Number(channel.on_median_mv);
-    const span = Number.isFinite(offMedian) && Number.isFinite(onMedian) ? Math.abs(onMedian - offMedian) : 0;
-    const darkMargin = Number.isFinite(offMedian) ? Math.max(3 * offSigma, Math.min(50, span * 0.03), 2) : 0;
+    const onMedian = finiteOrNull(channel.on_median_mv);
+    const span = offMedian !== null && onMedian !== null ? Math.abs(onMedian - offMedian) : 0;
+    const darkMargin = offMedian !== null ? Math.max(3 * offSigma, Math.min(50, span * 0.03), 2) : 0;
     let off = Number(channel.clear_threshold_mv);
-    if (!Number.isFinite(off)) off = Number.isFinite(offMedian) ? offMedian + (rising ? darkMargin : -darkMargin) : configuredOff;
-    if (rising) off = Math.max(configuredOff, Number.isFinite(offMedian) ? offMedian + darkMargin : Number(channel.threshold_mv ?? configuredOff), 0);
-    else off = Math.min(configuredOff, Number.isFinite(offMedian) ? offMedian - darkMargin : 3_300);
+    if (!Number.isFinite(off)) off = offMedian !== null ? offMedian + (rising ? darkMargin : -darkMargin) : configuredOff;
+    if (rising) off = Math.max(configuredOff, offMedian !== null ? offMedian + darkMargin : Number(channel.threshold_mv ?? configuredOff), 0);
+    else off = Math.min(configuredOff, offMedian !== null ? offMedian - darkMargin : 3_300);
     // Legacy records with a negative off edge have no distribution data from
     // which to infer a safe hysteresis band. Treat the calibrated turn-on
     // edge as the conservative clear edge until the device is recalibrated;
     // this prevents a 0.01–0.20 V dark reading from staying latched on.
-    if (!Number.isFinite(offMedian) || !Number.isFinite(onMedian)) {
+    if (offMedian === null || onMedian === null) {
       if (rising && configuredOff < 0) off = Math.max(off, on);
       if (!rising && configuredOff > 3_300) off = Math.min(off, on);
     }
     let set = on;
-    if (Number.isFinite(onMedian) && Number.isFinite(offMedian)) {
+    if (onMedian !== null && offMedian !== null) {
       const minimumGap = Math.max(5, span * 0.05);
       if (rising) set = Math.max(set, off + minimumGap);
       else set = Math.min(set, off - minimumGap);

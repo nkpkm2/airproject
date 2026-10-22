@@ -215,6 +215,7 @@ class DeviceCatalogTests(unittest.TestCase):
             },
         })
         self.assertEqual(config["channels"]["medium"]["clear_threshold_mv"], 52)
+        self.assertEqual(server.classify_calibrated_lamp(config["channels"]["medium"], 10, "on"), "off")
 
 
 class LampModeInferenceTests(unittest.TestCase):
@@ -229,6 +230,14 @@ class LampModeInferenceTests(unittest.TestCase):
                 }
             }
         }
+
+    def test_adc_telemetry_order_matches_confirmed_board_wiring(self):
+        board_config = (server.ROOT.parent / "include" / "board_config.h").read_text(encoding="utf-8")
+        self.assertIn("kAdcPins[] = {0, 4, 3, 1}", board_config)
+        self.assertEqual(server.LAMP_INDEX, {"low": 0, "medium": 1, "high": 2, "auto": 3})
+        for page_name in ("serial.html", "wifi.html"):
+            page = (server.ROOT.parent / "console" / page_name).read_text(encoding="utf-8")
+            self.assertIn("lamp-indicator.js?v=20261022a", page)
 
     def derive(self, values, history=None):
         record = {"state": {"mode": "unknown", "powered": True}}

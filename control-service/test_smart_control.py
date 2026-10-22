@@ -23,8 +23,8 @@ class SmartControlTests(unittest.TestCase):
         self.assertIn('id="social-signal-refresh"', page)
         self.assertIn('id="smart-arrow"', page)
         self.assertIn('id="rain-suppression"', page)
-        self.assertIn("fleet.css?v=20261022-smart15", page)
-        self.assertIn("fleet.js?v=20261022-smart15", page)
+        self.assertIn("fleet.css?v=20261022-smart16", page)
+        self.assertIn("fleet.js?v=20261022-smart16", page)
         self.assertIn("不是室内花粉清除时间", page)
         self.assertIn("rain_suppression:$('rain-suppression').checked", script)
         self.assertIn("$('smart-open').onclick=toggleSmart", script)
@@ -322,7 +322,19 @@ class SmartControlTests(unittest.TestCase):
         parsed = smart.parse_official_pollen_page(page, now)
         self.assertEqual(parsed["level"], 4)
         self.assertEqual(parsed["level_precision"], "explicit")
-        self.assertEqual(parsed["predicted_peak_at"], "2026-04-05T10:00:00+08:00")
+        self.assertEqual(parsed["predicted_peak_at"], "2026-04-05T00:00:00+08:00")
+        self.assertEqual(parsed["peak_time_precision"], "date_window_calendar_day")
+        preboost_config = smart.normalize_config({"preboost_minutes": 45})
+        def assess_parsed_at(at):
+            return smart.assess(
+                preboost_config, None, at,
+                official_signal=dict(parsed, fetched_at_ms=int(at.timestamp() * 1000)))
+        before_lead = assess_parsed_at(datetime(2026, 4, 4, 23, 14, tzinfo=now.tzinfo))
+        at_lead = assess_parsed_at(datetime(2026, 4, 4, 23, 15, tzinfo=now.tzinfo))
+        at_peak_start = assess_parsed_at(datetime(2026, 4, 5, 0, 0, tzinfo=now.tzinfo))
+        self.assertFalse(before_lead["preboost_active"])
+        self.assertTrue(at_lead["preboost_active"])
+        self.assertEqual(at_peak_start["score"], 72)
         stale = page.replace("2026年4月1日", "2026年3月20日")
         with self.assertRaisesRegex(ValueError, "最近 7 天"):
             smart.parse_official_pollen_page(stale, now)
@@ -339,13 +351,13 @@ class SmartControlTests(unittest.TestCase):
         parsed_peak = smart.parse_official_pollen_page(
             official_style, datetime(2026, 3, 17, 8, tzinfo=ZoneInfo("Asia/Shanghai")))
         self.assertEqual(parsed_peak["level"], 3)
-        self.assertEqual(parsed_peak["predicted_peak_at"], "2026-03-17T10:00:00+08:00")
+        self.assertEqual(parsed_peak["predicted_peak_at"], "2026-03-17T00:00:00+08:00")
         self.assertEqual(parsed_peak["predicted_peak_until"], "2026-03-21T23:59:59+08:00")
 
         ongoing_window = official_style.replace("2026-03-17", "2026-03-19")
         parsed_ongoing = smart.parse_official_pollen_page(
             ongoing_window, datetime(2026, 3, 20, 8, tzinfo=ZoneInfo("Asia/Shanghai")))
-        self.assertEqual(parsed_ongoing["predicted_peak_at"], "2026-03-17T10:00:00+08:00")
+        self.assertEqual(parsed_ongoing["predicted_peak_at"], "2026-03-17T00:00:00+08:00")
         self.assertEqual(parsed_ongoing["predicted_peak_until"], "2026-03-21T23:59:59+08:00")
 
         official_page_excerpt = (
@@ -356,7 +368,7 @@ class SmartControlTests(unittest.TestCase):
         parsed_real_wording = smart.parse_official_pollen_page(
             official_page_excerpt, datetime(2026, 3, 17, 17, tzinfo=ZoneInfo("Asia/Shanghai")))
         self.assertEqual(parsed_real_wording["level"], 3)
-        self.assertEqual(parsed_real_wording["predicted_peak_at"], "2026-03-17T10:00:00+08:00")
+        self.assertEqual(parsed_real_wording["predicted_peak_at"], "2026-03-17T00:00:00+08:00")
         self.assertEqual(parsed_real_wording["predicted_peak_until"], "2026-03-21T23:59:59+08:00")
 
         # A future peak mentioned in a negative clause is not evidence that
@@ -367,7 +379,7 @@ class SmartControlTests(unittest.TestCase):
         )
         parsed_not_yet_peak = smart.parse_official_pollen_page(not_yet_peak, now)
         self.assertEqual(parsed_not_yet_peak["level"], 2)
-        self.assertEqual(parsed_not_yet_peak["predicted_peak_at"], "2026-04-05T10:00:00+08:00")
+        self.assertEqual(parsed_not_yet_peak["predicted_peak_at"], "2026-04-05T00:00:00+08:00")
 
         # The official local phenology notices can describe only旬-level
         # windows (“3月中下旬至4月上旬”), so retain a clearly approximate range.
@@ -378,9 +390,9 @@ class SmartControlTests(unittest.TestCase):
         parsed_phenology = smart.parse_official_pollen_page(
             phenology_excerpt, datetime(2026, 3, 12, 18, tzinfo=ZoneInfo("Asia/Shanghai")))
         self.assertEqual(parsed_phenology["level"], 3)
-        self.assertEqual(parsed_phenology["predicted_peak_at"], "2026-03-11T10:00:00+08:00")
+        self.assertEqual(parsed_phenology["predicted_peak_at"], "2026-03-11T00:00:00+08:00")
         self.assertEqual(parsed_phenology["predicted_peak_until"], "2026-04-10T23:59:59+08:00")
-        self.assertEqual(parsed_phenology["peak_time_precision"], "approximate_month_decade_10_local")
+        self.assertEqual(parsed_phenology["peak_time_precision"], "approximate_month_decade_calendar_day")
 
         # For official ranges, use the lower bound rather than accidentally
         # matching the upper endpoint as a standalone level.
@@ -400,7 +412,7 @@ class SmartControlTests(unittest.TestCase):
             "<p>柏科花粉浓度高，4月5日—8日预计为高峰期。</p>"
         )
         parsed_em_dash_window = smart.parse_official_pollen_page(em_dash_window, now)
-        self.assertEqual(parsed_em_dash_window["predicted_peak_at"], "2026-04-05T10:00:00+08:00")
+        self.assertEqual(parsed_em_dash_window["predicted_peak_at"], "2026-04-05T00:00:00+08:00")
         self.assertEqual(parsed_em_dash_window["predicted_peak_until"], "2026-04-08T23:59:59+08:00")
 
     def test_official_peak_window_keeps_recent_multiday_forecast_valid_through_its_end(self):

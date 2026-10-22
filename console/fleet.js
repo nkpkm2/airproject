@@ -46,7 +46,7 @@ function renderSmart(snapshot,populate=false){
   const pollenStatus=pollenSource==='verified_gov_cn_page'?'自动读取并参与当前评分':pollenSource==='verified_gov_cn_page_forecast'?'自动读取；未来峰值预报有效，尚未按当前浓度计分':'已读取但未参与评分';
   const peakStart=pollen?.predicted_peak_at?new Date(pollen.predicted_peak_at):null,peakEnd=pollen?.predicted_peak_until?new Date(pollen.predicted_peak_until):null;
   const peakWindow=peakStart?`${peakStart.toLocaleDateString()}${peakEnd&&peakEnd.toDateString()!==peakStart.toDateString()?` 至 ${peakEnd.toLocaleDateString()}`:''}`:'';
-  const peakPrecision=pollen?.peak_time_precision==='approximate_month_decade_10_local'?'（旬级估算）':'';
+  const peakPrecision=pollen?.peak_time_precision==='approximate_month_decade_calendar_day'?'（旬级估算；按当地日开始）':pollen?.peak_time_precision==='date_window_calendar_day'?'（日期范围；按当地日开始）':'';
   const levelPrecision=pollen?.level_precision==='range_lower_bound'?'（分级区间取较低值）':'';
   const manualForecastAge=config.official_forecast_updated_at==null?Infinity:(Date.now()-Number(config.official_forecast_updated_at))/3600000;
   const manualForecastStatus=Number(config.official_forecast_level)>0?`人工未来预报 ${pollenLabels[Number(config.official_forecast_level)]||'未判定'} · ${manualForecastAge>=0&&manualForecastAge<=168?'复核有效':'已过期/待复核'} · ${config.official_peak_at?new Date(config.official_peak_at).toLocaleString():''} 至 ${config.official_forecast_until?new Date(config.official_forecast_until).toLocaleString():''}`:'';

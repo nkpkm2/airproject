@@ -745,9 +745,12 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
                 # published. Keep an ongoing range; reject only windows fully
                 # in the past so their peak can still be shown to the operator.
                 if end_day < published.date(): continue
-                peak_at = datetime(year, month, day, 10, 0, tzinfo=published.tzinfo).isoformat()
-                # The forecast window covers the full final calendar day;
-                # 10:00 is only the estimated first-day preboost reference.
+                # A forecast that gives only a date has day-level precision.
+                # Represent the whole day from local midnight rather than
+                # inventing a 10:00 peak time and leaving the first ten hours
+                # of a declared peak day at the previous tier.
+                peak_at = datetime(year, month, day, 0, 0, tzinfo=published.tzinfo).isoformat()
+                # The forecast window covers the full final calendar day.
                 peak_until = datetime(end_day.year, end_day.month, end_day.day,
                                       23, 59, 59, tzinfo=published.tzinfo).isoformat()
                 break
@@ -797,7 +800,7 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
                         _, end_day = period_bounds(end_year, end_month, end_label)
                     if end_day < published.date(): continue
                     peak_at = datetime(start_day.year, start_day.month, start_day.day,
-                                       10, 0, tzinfo=published.tzinfo).isoformat()
+                                       0, 0, tzinfo=published.tzinfo).isoformat()
                     peak_until = datetime(end_day.year, end_day.month, end_day.day,
                                           23, 59, 59, tzinfo=published.tzinfo).isoformat()
                     approximate_peak_window = True
@@ -808,8 +811,8 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
     return {"level": level, "published_at_ms": int(published.timestamp() * 1000),
             "level_precision": level_precision,
             "predicted_peak_at": peak_at, "predicted_peak_until": peak_until,
-            "peak_time_precision": ("approximate_month_decade_10_local" if approximate_peak_window
-                                    else "date_window_10_local" if peak_at else None),
+            "peak_time_precision": ("approximate_month_decade_calendar_day" if approximate_peak_window
+                                    else "date_window_calendar_day" if peak_at else None),
             "evidence": context[:600], "age_days": round(age_days, 2)}
 
 

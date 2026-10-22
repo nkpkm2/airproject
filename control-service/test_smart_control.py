@@ -82,6 +82,17 @@ class SmartControlTests(unittest.TestCase):
                     saved = json.loads(request.read().decode())
                     self.assertFalse(saved["enabled"])
                     self.assertTrue((Path(folder) / "settings.json").exists())
+                    payload.update(official_level=3, official_note="柏科高", official_url="https://www.beijing.gov.cn/a")
+                    request = urlopen(Request(
+                        base, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="PUT"), timeout=3)
+                    first_official = json.loads(request.read().decode())["config"]["official_updated_at"]
+                    payload["official_updated_at"] = first_official
+                    time.sleep(0.02)
+                    payload["official_url"] = "https://www.beijing.gov.cn/b"
+                    request = urlopen(Request(
+                        base, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="PUT"), timeout=3)
+                    second_official = json.loads(request.read().decode())["config"]["official_updated_at"]
+                    self.assertEqual(second_official, first_official, "changing scraper URL must not refresh the manual pollen level")
                     payload.update(enabled=True, baselines={"pur-test": "low"})
                     request = Request(
                         base, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="PUT")

@@ -1061,7 +1061,8 @@ class Handler(BaseHTTPRequestHandler):
                 config = smart_control.normalize_config(body)
                 with LOCK:
                     previous = dict(SMART_CONFIG)
-                    if any(config.get(key) != previous.get(key) for key in ("official_level", "official_note", "official_url", "official_peak_at")) or (config["official_level"] and not config.get("official_updated_at")):
+                    if (any(config.get(key) != previous.get(key) for key in ("official_level", "official_note"))
+                            or (config["official_level"] and not config.get("official_updated_at"))):
                         config["official_updated_at"] = int(time.time() * 1000)
                     if any(config.get(key) != previous.get(key) for key in ("social_level", "social_note")) or (config["social_level"] and not config.get("social_updated_at")):
                         config["social_updated_at"] = int(time.time() * 1000)

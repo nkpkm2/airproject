@@ -51,42 +51,63 @@ def default_config() -> dict[str, Any]:
     }
 
 
+def _config_number(value: Any, field: str, minimum: float, maximum: float,
+                  *, integer: bool = False) -> int | float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} 必须是数字")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{field} 参数无效")
+    if not math.isfinite(number):
+        raise ValueError(f"{field} 必须是有限数字")
+    if not minimum <= number <= maximum:
+        raise ValueError(f"{field} 参数超出范围")
+    if integer:
+        if not number.is_integer():
+            raise ValueError(f"{field} 必须是整数")
+        return int(number)
+    return number
+
+
 def normalize_config(source: object) -> dict[str, Any]:
     if not isinstance(source, dict):
         raise ValueError("设置必须是对象")
     value = default_config()
     value.update(source)
     value["schema"] = "air-smart-control-v1"
-    value["enabled"] = bool(value.get("enabled"))
+    if not isinstance(value.get("enabled"), bool):
+        raise ValueError("enabled 必须是布尔值")
     value["location_name"] = str(value.get("location_name", "")).strip()[:80]
     for key, low, high in (("latitude", -90, 90), ("longitude", -180, 180)):
         raw = value.get(key)
         if raw in (None, ""):
             value[key] = None
         else:
-            try: raw = float(raw)
-            except (TypeError, ValueError): raise ValueError(f"{key} 坐标无效")
-            if not low <= raw <= high: raise ValueError(f"{key} 坐标超出范围")
-            value[key] = raw
+            label = "纬度" if key == "latitude" else "经度"
+            value[key] = _config_number(raw, label, low, high)
     if value["enabled"] and (value["latitude"] is None or value["longitude"] is None):
         raise ValueError("启用自动调控前必须填写家庭所在地坐标")
     value["timezone"] = str(value.get("timezone") or "Asia/Shanghai")[:48]
     try: resolve_timezone(value["timezone"])
     except Exception: raise ValueError("时区名称无效，请使用 IANA 时区，例如 Asia/Shanghai")
+    integer_fields = {"device_count", "evening_minutes", "preboost_minutes", "residual_hours"}
     for key, low, high in (("area_m2", 1, 10000), ("ceiling_m", 1, 10), ("device_count", 1, 200),
                            ("evening_minutes", 0, 240), ("preboost_minutes", 0, 360), ("residual_hours", 0, 72)):
-        try: number = float(value.get(key))
-        except (TypeError, ValueError): raise ValueError(f"{key} 参数无效")
-        if not low <= number <= high: raise ValueError(f"{key} 参数超出范围")
-        value[key] = int(number) if number.is_integer() else number
-    value["strength"] = value.get("strength") if value.get("strength") in STRENGTHS else "high"
-    flow = value.get("airflow_m3h") if isinstance(value.get("airflow_m3h"), dict) else {}
-    value["airflow_m3h"] = {key: min(2000, max(0, float(flow.get(key, default))))
-                            for key, default in (("low", 20), ("medium", 70), ("high", 150))}
+        value[key] = _config_number(value.get(key), key, low, high, integer=key in integer_fields)
+    if value.get("strength") not in STRENGTHS:
+        raise ValueError("控制力度必须为正常、高或特强")
+    flow = value.get("airflow_m3h")
+    if not isinstance(flow, dict):
+        raise ValueError("airflow_m3h 必须包含低、中、高三档风量")
+    value["airflow_m3h"] = {
+        key: _config_number(flow.get(key, default), f"{key} 档风量", 0, 2000)
+        for key, default in (("low", 20), ("medium", 70), ("high", 150))
+    }
     for key in ("official_level", "social_level"):
         maximum = 4 if key == "official_level" else 3
-        try: value[key] = min(maximum, max(0, int(value.get(key, 0))))
-        except (TypeError, ValueError): raise ValueError("official_level 必须是 0–4，social_level 必须是 0–3")
+        label = "官方花粉等级" if key == "official_level" else "社交趋势等级"
+        value[key] = _config_number(value.get(key, 0), label, 0, maximum, integer=True)
     value["official_note"] = str(value.get("official_note", "")).strip()[:500]
     value["official_url"] = str(value.get("official_url", "")).strip()[:500]
     value["official_peak_at"] = str(value.get("official_peak_at", "")).strip()[:40]
@@ -96,12 +117,24 @@ def normalize_config(source: object) -> dict[str, Any]:
     for key in ("season_start_md", "season_end_md"):
         value[key] = str(value.get(key, "")).strip()[:5]
         if value[key]:
-            try: datetime.strptime(value[key], "%m-%d")
+            try: datetime.strptime(f"2000-{value[key]}", "%Y-%m-%d")
             except ValueError: raise ValueError("花粉季日期请按 MM-DD 填写")
+    if bool(value["season_start_md"]) != bool(value["season_end_md"]):
+        raise ValueError("花粉季起始和结束日期需要同时填写")
     value["social_note"] = str(value.get("social_note", "")).strip()[:500]
-    if not isinstance(value.get("baselines"), dict): value["baselines"] = {}
-    value["baselines"] = {str(device_id)[:96]: mode for device_id, mode in value["baselines"].items()
-                           if mode in (*MODES, "off")}
+    if not isinstance(value.get("baselines"), dict):
+        raise ValueError("baselines 必须是设备 ID 到基准档位的对象")
+    normalized_baselines = {}
+    for device_id, mode in value["baselines"].items():
+        device_key = str(device_id).strip()
+        if not device_key or len(device_key) > 96:
+            raise ValueError("设备 ID 不能为空且不能超过 96 个字符")
+        if mode == "":
+            continue
+        if mode not in (*MODES, "off"):
+            raise ValueError(f"设备 {device_key} 的基准档位无效")
+        normalized_baselines[device_key] = mode
+    value["baselines"] = normalized_baselines
     try:
         start = str(value.get("evening_start", "17:10"))
         daytime.fromisoformat(start)

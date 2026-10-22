@@ -343,6 +343,28 @@ class SmartControlTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "坐标"):
             smart.normalize_config({"enabled": True})
 
+    def test_smart_config_rejects_ambiguous_or_nonfinite_control_values(self):
+        invalid_configs = [
+            {"enabled": "false"},
+            {"area_m2": True},
+            {"latitude": True},
+            {"device_count": 23.5},
+            {"evening_minutes": float("inf")},
+            {"airflow_m3h": {"low": float("nan"), "medium": 70, "high": 150}},
+            {"official_level": 2.5},
+            {"social_level": True},
+            {"strength": "unknown"},
+            {"season_start_md": "03-01"},
+            {"baselines": {"pur-test": "turbo"}},
+        ]
+        for invalid in invalid_configs:
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                smart.normalize_config(invalid)
+
+        # Leap-day season boundaries are valid in the recurring calendar.
+        valid = smart.normalize_config({"season_start_md": "02-29", "season_end_md": "05-15"})
+        self.assertEqual(valid["season_start_md"], "02-29")
+
     def test_weather_and_social_cannot_claim_extreme_without_official_pollen(self):
         config = smart.normalize_config({"social_level": 3})
         weather = {"current": {"temperature_2m": 15, "precipitation": 0, "cloud_cover": 10},

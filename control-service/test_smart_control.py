@@ -15,6 +15,17 @@ from test_dev_server import server
 
 
 class SmartControlTests(unittest.TestCase):
+    def test_explicit_signal_review_controls_are_in_the_fleet_page_and_assets_are_cache_busted(self):
+        console = server.ROOT.parent / "console"
+        page = (console / "fleet.html").read_text(encoding="utf-8")
+        script = (console / "fleet.js").read_text(encoding="utf-8")
+        self.assertIn('id="official-signal-refresh"', page)
+        self.assertIn('id="social-signal-refresh"', page)
+        self.assertIn("fleet.css?v=20261022-smart8", page)
+        self.assertIn("fleet.js?v=20261022-smart8", page)
+        self.assertIn("saveSmart($('smart-enabled').checked,'official')", script)
+        self.assertIn("saveSmart($('smart-enabled').checked,'social')", script)
+
     def test_restart_recovery_drops_unpublished_queue_and_marks_inflight_pulse_uncertain(self):
         runtime = {"device_actions": {"pur-test": {
             "queue_command": "opto.mode.pulse", "queue_origin": "smart_control",

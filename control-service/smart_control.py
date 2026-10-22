@@ -18,6 +18,8 @@ MODES = ("low", "medium", "high", "auto")
 MODE_LABELS = {"off": "关机", "low": "低速", "medium": "中速", "high": "高速", "auto": "自动"}
 STRENGTHS = {"normal": 1, "high": 2, "extra": 3}
 LEVELS = ("weak", "normal", "high", "extreme")
+_RECENT_OFFICIAL_ARTICLE_DAYS = 7
+_MAX_EXPLICIT_OFFICIAL_WINDOW_DAYS = 45
 
 _FIXED_ZONE_FALLBACKS = {
     "UTC": 0, "Etc/UTC": 0, "Asia/Shanghai": 480, "Asia/Singapore": 480,
@@ -292,16 +294,22 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
                                  else peak_start_at + timedelta(hours=24))
                 if peak_until_at.tzinfo is None:
                     peak_until_at = peak_until_at.replace(tzinfo=now_local.tzinfo)
-                peak_window_active = now_local <= peak_until_at + timedelta(hours=12)
+                peak_window_active = (
+                    now_local <= peak_until_at + timedelta(hours=12)
+                    and peak_start_at <= now_local + timedelta(days=_MAX_EXPLICIT_OFFICIAL_WINDOW_DAYS)
+                )
                 peak_window_expired = not peak_window_active
             except (TypeError, ValueError, OverflowError):
                 peak_window_active = False
                 peak_start_at = None
         if published_age is None and peak_window_active:
-            # A fresh fetch of a recent article remains usable through its
-            # explicitly predicted multi-day peak window, but never beyond a
-            # seven-day publication-age ceiling or twelve-hour post-window grace.
-            published_age = fresh_age_seconds(official_signal.get("published_at_ms"), 7 * 24 * 3600)
+            # An explicitly dated government forecast can remain useful while
+            # its named window is upcoming or active, even if the bulletin is
+            # more than a week old. Hourly refetch freshness is still required,
+            # and explicit windows/lookahead are capped at 45 days.
+            published_age = fresh_age_seconds(
+                official_signal.get("published_at_ms"),
+                _MAX_EXPLICIT_OFFICIAL_WINDOW_DAYS * 24 * 3600)
         try: candidate = int(official_signal.get("level", 0))
         except (TypeError, ValueError): candidate = 0
         if (fetched_age is not None and published_age is not None and 1 <= candidate <= 4
@@ -690,8 +698,10 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
     try: published = datetime(*(int(part) for part in date_match.groups()), tzinfo=now.tzinfo)
     except ValueError: raise ValueError("公告发布日期无效")
     age_days = (now - published).total_seconds() / 86_400
-    if age_days < -1 or age_days > 7:
-        raise ValueError("该公告不是最近 7 天发布，已忽略旧预报")
+    if age_days < -1:
+        raise ValueError("公告发布日期在未来，暂不采信")
+    if age_days > _MAX_EXPLICIT_OFFICIAL_WINDOW_DAYS:
+        raise ValueError("该公告超过 45 天，已忽略旧预报")
     pollen_terms = re.compile(r"柏科|侧柏|圆柏|沙地柏|柏树|cupressaceae|cypress", re.I)
     positions = [match.start() for match in pollen_terms.finditer(text)]
     if not positions:
@@ -772,7 +782,42 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
                       "上中旬": (1, 20), "中下旬": (11, last)}
             first_day, last_day = ranges[label]
             return date(year, month, first_day), date(year, month, last_day)
+        # Some annual notices use a natural sentence rather than a compact
+        # “March mid-to-late / April early” range: “3月中旬前后进入高峰期，
+        # 将持续至4月下旬”. Capture both ends around the peak phrase so a
+        # month-long season is not truncated to the first旬.
+        period_span_pattern = re.compile(
+            r"(?:(20\d{2})\s*年\s*)?(\d{1,2})\s*月\s*(上旬|中旬|下旬|上中旬|中下旬)"
+            r"(?:前后)?[^。；！？]{0,80}?(?:持续|延续)(?:至|到)"
+            r"\s*(?:(20\d{2})\s*年\s*)?(?:(\d{1,2})\s*月\s*)?"
+            r"(上旬|中旬|下旬|上中旬|中下旬)"
+        )
         for peak_match in re.finditer(r"高峰(?:日|期)?|达峰|峰值", text):
+            window_start = max(0, peak_match.start() - 180)
+            window = text[window_start:min(len(text), peak_match.end() + 100)]
+            if not pollen_terms.search(window): continue
+            span_match = period_span_pattern.search(window)
+            if not span_match: continue
+            first_year, first_month, first_label, second_year, second_month, second_label = span_match.groups()
+            try:
+                year = int(first_year or published.year)
+                month = int(first_month)
+                start_day, _ = period_bounds(year, month, first_label)
+                end_year = int(second_year or year)
+                end_month = int(second_month or month)
+                if not second_year and end_month < month: end_year += 1
+                _, end_day = period_bounds(end_year, end_month, second_label)
+                if end_day < published.date(): continue
+                peak_at = datetime(start_day.year, start_day.month, start_day.day,
+                                   0, 0, tzinfo=published.tzinfo).isoformat()
+                peak_until = datetime(end_day.year, end_day.month, end_day.day,
+                                      23, 59, 59, tzinfo=published.tzinfo).isoformat()
+                approximate_peak_window = True
+                break
+            except (TypeError, ValueError, OverflowError):
+                continue
+        for peak_match in re.finditer(r"高峰(?:日|期)?|达峰|峰值", text):
+            if peak_at: break
             window_start = max(0, peak_match.start() - 180)
             window = text[window_start:min(len(text), peak_match.end() + 100)]
             if not pollen_terms.search(window): continue
@@ -808,6 +853,15 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
                 except (TypeError, ValueError, OverflowError):
                     continue
             if peak_at: break
+    if peak_at:
+        peak_start_at = datetime.fromisoformat(peak_at)
+        peak_until_at = datetime.fromisoformat(peak_until)
+        if peak_start_at > now + timedelta(days=_MAX_EXPLICIT_OFFICIAL_WINDOW_DAYS):
+            raise ValueError("官方高峰日期超过 45 天预报范围，暂不采信")
+        if peak_until_at < now - timedelta(hours=12):
+            raise ValueError("该官方柏科高峰窗口已结束，未采信旧预报")
+    elif age_days > _RECENT_OFFICIAL_ARTICLE_DAYS:
+        raise ValueError("超过 7 天的公告必须包含仍有效的明确高峰日期范围")
     return {"level": level, "published_at_ms": int(published.timestamp() * 1000),
             "level_precision": level_precision,
             "predicted_peak_at": peak_at, "predicted_peak_until": peak_until,

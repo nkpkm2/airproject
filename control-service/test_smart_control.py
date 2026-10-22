@@ -335,8 +335,8 @@ class SmartControlTests(unittest.TestCase):
         self.assertFalse(before_lead["preboost_active"])
         self.assertTrue(at_lead["preboost_active"])
         self.assertEqual(at_peak_start["score"], 72)
-        stale = page.replace("2026年4月1日", "2026年3月20日")
-        with self.assertRaisesRegex(ValueError, "最近 7 天"):
+        stale = "<p>发布时间：2026年3月20日</p><p>柏科花粉浓度极高。</p>"
+        with self.assertRaisesRegex(ValueError, "超过 7 天"):
             smart.parse_official_pollen_page(stale, now)
         weeds_only = page.replace("柏科", "蒿草").replace("侧柏", "杂草")
         with self.assertRaisesRegex(ValueError, "未明确提到柏科"):
@@ -414,6 +414,45 @@ class SmartControlTests(unittest.TestCase):
         parsed_em_dash_window = smart.parse_official_pollen_page(em_dash_window, now)
         self.assertEqual(parsed_em_dash_window["predicted_peak_at"], "2026-04-05T00:00:00+08:00")
         self.assertEqual(parsed_em_dash_window["predicted_peak_until"], "2026-04-08T23:59:59+08:00")
+
+    def test_explicit_official_forecast_window_remains_usable_beyond_seven_days(self):
+        published = datetime(2026, 3, 16, 9, tzinfo=ZoneInfo("Asia/Shanghai"))
+        now = datetime(2026, 3, 30, 12, tzinfo=published.tzinfo)
+        article = (
+            "<p>发布日期：2026年3月16日</p>"
+            "<p>柏科花粉浓度高，预计3月8日至4月22日进入高峰期。</p>"
+        )
+        parsed = smart.parse_official_pollen_page(article, now)
+        self.assertEqual(parsed["predicted_peak_at"], "2026-03-08T00:00:00+08:00")
+        self.assertEqual(parsed["predicted_peak_until"], "2026-04-22T23:59:59+08:00")
+
+        signal = dict(parsed, fetched_at_ms=int(now.timestamp() * 1000))
+        active = smart.assess(smart.normalize_config({}), None, now, official_signal=signal)
+        self.assertEqual(active["score"], 52)
+        self.assertEqual(active["sources"]["official_pollen"], "verified_gov_cn_page")
+
+        before_start = datetime(2026, 3, 1, 12, tzinfo=published.tzinfo)
+        with self.assertRaisesRegex(ValueError, "发布日期在未来"):
+            smart.parse_official_pollen_page(article, before_start)
+
+        very_old = article.replace("2026年3月16日", "2026年2月8日")
+        with self.assertRaisesRegex(ValueError, "超过 45 天"):
+            smart.parse_official_pollen_page(very_old, now)
+
+        too_far = article.replace("3月8日至4月22日", "6月8日至7月22日")
+        with self.assertRaisesRegex(ValueError, "45 天预报范围"):
+            smart.parse_official_pollen_page(too_far, now)
+
+    def test_official_forecast_parser_keeps_full_natural_language_season_span(self):
+        now = datetime(2026, 3, 20, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        article = (
+            "<p>日期：2026-03-16</p>"
+            "<p>今年春季柏科花粉始期为3月8日左右，3月中旬前后将逐步进入散粉高峰期，将持续至4月下旬。</p>"
+        )
+        parsed = smart.parse_official_pollen_page(article, now)
+        self.assertEqual(parsed["predicted_peak_at"], "2026-03-11T00:00:00+08:00")
+        self.assertEqual(parsed["predicted_peak_until"], "2026-04-30T23:59:59+08:00")
+        self.assertEqual(parsed["peak_time_precision"], "approximate_month_decade_calendar_day")
 
     def test_official_peak_window_keeps_recent_multiday_forecast_valid_through_its_end(self):
         config = smart.normalize_config({})

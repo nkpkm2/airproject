@@ -493,7 +493,10 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     forecast_hours_used = 0
     forecast_weather_adjustment = 0.0
     forecast_components = {"warm_clear_hours": 0, "low_humidity_hours": 0,
-                           "high_precipitation_probability_hours": 0}
+                           "high_precipitation_probability_hours": 0,
+                           "warm_clear_contribution": 0.0,
+                           "low_humidity_contribution": 0.0,
+                           "rain_suppression_contribution": 0.0}
     if weather and weather_context_active and isinstance(weather.get("hourly"), dict):
         hourly = weather["hourly"]
         times = hourly.get("time", [])
@@ -525,31 +528,57 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
                 continue
             if now_local <= sample_at <= window_end:
                 forecast_indices.append(index)
-        delta = 0
+        # Use continuous, bounded proxies for the next-six-hour outlook. The
+        # old boolean tests (e.g. rain probability 29% vs 30%) made a single
+        # forecast-point change jump the score by a whole point. These signals
+        # remain deliberately weak and may only raise the forecast tier; they
+        # can never reduce today's directly assessed risk.
+        delta = 0.0
         for index in forecast_indices:
             temp = _bounded_weather_number(temps[index], -90, 60) if index < len(temps) else None
             humidity = _bounded_weather_number(humidities[index], 0, 100) if index < len(humidities) else None
             rain_probability = _bounded_weather_number(probs[index], 0, 100) if index < len(probs) else None
             cloud = _bounded_weather_number(clouds[index], 0, 100) if index < len(clouds) else None
+            warm_factor = 0.0
+            if temp is not None:
+                if 5 < temp < 10: warm_factor = (temp - 5) / 5
+                elif 10 <= temp <= 18: warm_factor = 1.0
+                elif 18 < temp < 22: warm_factor = (22 - temp) / 4
+            clear_factor = max(0.0, min(1.0, (60 - cloud) / 40)) if cloud is not None else None
+            dry_forecast_factor = max(0.0, min(1.0, (70 - rain_probability) / 60)) if rain_probability is not None else None
+            if warm_factor > 0 and clear_factor is not None and dry_forecast_factor is not None:
+                contribution = warm_factor * clear_factor * dry_forecast_factor
+                delta += contribution
+                forecast_components["warm_clear_contribution"] += contribution
             if (temp is not None and 5 <= temp <= 22 and rain_probability is not None
                     and rain_probability < 30 and cloud is not None and cloud < 45):
-                delta += 1
                 forecast_components["warm_clear_hours"] += 1
             if humidity is not None and humidity < 40:
-                delta += 1
                 forecast_components["low_humidity_hours"] += 1
+            if humidity is not None:
+                contribution = 0.25 * max(0.0, min(1.0, (50 - humidity) / 20))
+                delta += contribution
+                forecast_components["low_humidity_contribution"] += contribution
+            if rain_probability is not None:
+                suppression = 1.5 * max(0.0, min(1.0, (rain_probability - 20) / 60))
+                delta -= suppression
+                forecast_components["rain_suppression_contribution"] += suppression
             if rain_probability is not None and rain_probability >= 60:
-                delta -= 2
                 forecast_components["high_precipitation_probability_hours"] += 1
         forecast_hours_used = len(forecast_indices)
         forecast_score = max(score, max(0, min(100, score + max(-6, min(6, delta)))))
         forecast_weather_adjustment = round(forecast_score - score, 1)
+        for key in ("warm_clear_contribution", "low_humidity_contribution", "rain_suppression_contribution"):
+            forecast_components[key] = round(forecast_components[key], 2)
         if forecast_hours_used:
             reasons.append(
                 f"未来 6 小时天气参考 {forecast_hours_used} 个整点样本"
                 f"（温暖晴朗 {forecast_components['warm_clear_hours']} 小时、"
                 f"低湿 {forecast_components['low_humidity_hours']} 小时、"
                 f"高降水概率 {forecast_components['high_precipitation_probability_hours']} 小时），"
+                f"连续分量：暖晴 +{forecast_components['warm_clear_contribution']:g}、"
+                f"低湿 +{forecast_components['low_humidity_contribution']:g}、"
+                f"降雨抑制 -{forecast_components['rain_suppression_contribution']:g} 分；"
                 f"预测评分净上调 {forecast_weather_adjustment:g} 分（上限 +6；天气不会下调当前花粉等级）"
             )
     preboost = False

@@ -826,7 +826,10 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(risk["forecast_weather_adjustment"], 6)
         self.assertEqual(risk["forecast_components"], {
             "warm_clear_hours": 6, "low_humidity_hours": 0,
-            "high_precipitation_probability_hours": 0})
+            "high_precipitation_probability_hours": 0,
+            "warm_clear_contribution": 6.0,
+            "low_humidity_contribution": 0.0,
+            "rain_suppression_contribution": 0.0})
         self.assertTrue(any("6 个整点样本" in reason for reason in risk["reasons"]))
 
         # Conversely, future rain must be considered even if the first six
@@ -841,6 +844,51 @@ class SmartControlTests(unittest.TestCase):
         # A wetter outlook must not lower today's direct pollen assessment.
         self.assertEqual(rainy_future["forecast_score_6h"], 30)
         self.assertEqual(rainy_future["forecast_components"]["high_precipitation_probability_hours"], 6)
+
+    def test_six_hour_weather_forecast_modifiers_are_continuous_and_bounded(self):
+        now = datetime(2026, 4, 1, 14, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+        fetched = int(now.timestamp() * 1000)
+        config = smart.normalize_config({"official_level": 2, "official_updated_at": fetched})
+
+        def forecast_adjustment(temp=15, rain_probability=30, cloud=40, humidity=55):
+            weather = {
+                "fetched_at_ms": fetched,
+                "timezone": "Asia/Shanghai",
+                "current": {},
+                "hourly": {
+                    "time": ["2026-04-01T15:00"],
+                    "temperature_2m": [temp],
+                    "relative_humidity_2m": [humidity],
+                    "precipitation_probability": [rain_probability],
+                    "cloud_cover": [cloud],
+                },
+            }
+            return smart.assess(config, weather, now)
+
+        for left, right in ((4.99, 5.01), (9.99, 10.01), (17.99, 18.01), (21.99, 22.01)):
+            with self.subTest(temperature=(left, right)):
+                a = forecast_adjustment(temp=left)["forecast_weather_adjustment"]
+                b = forecast_adjustment(temp=right)["forecast_weather_adjustment"]
+                self.assertLessEqual(abs(a - b), 0.02)
+        for left, right in ((19.99, 20.01), (29.99, 30.01), (59.99, 60.01), (69.99, 70.01)):
+            with self.subTest(rain_probability=(left, right)):
+                a = forecast_adjustment(rain_probability=left)["forecast_weather_adjustment"]
+                b = forecast_adjustment(rain_probability=right)["forecast_weather_adjustment"]
+                self.assertLessEqual(abs(a - b), 0.02)
+        for left, right in ((19.99, 20.01), (39.99, 40.01), (59.99, 60.01)):
+            with self.subTest(cloud=(left, right)):
+                a = forecast_adjustment(cloud=left)["forecast_weather_adjustment"]
+                b = forecast_adjustment(cloud=right)["forecast_weather_adjustment"]
+                self.assertLessEqual(abs(a - b), 0.02)
+
+        rain_scores = [forecast_adjustment(rain_probability=value)["forecast_score_6h"]
+                       for value in (0, 10, 20, 30, 40, 60, 80, 100)]
+        self.assertTrue(all(later <= earlier for earlier, later in zip(rain_scores, rain_scores[1:])))
+        sunny = forecast_adjustment(rain_probability=0, cloud=0)
+        self.assertLessEqual(sunny["forecast_weather_adjustment"], 6)
+        rainy = forecast_adjustment(rain_probability=100, cloud=100)
+        self.assertEqual(rainy["forecast_score_6h"], rainy["score"],
+                         "future rain may suppress the forecast modifier, not today's assessed pollen risk")
 
     def test_malformed_weather_shapes_and_nonfinite_values_do_not_crash_or_boost(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))

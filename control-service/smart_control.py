@@ -239,6 +239,7 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             reasons.append("自动读取的官方预报超过控制有效期或时间异常，未参与控制")
     score = (0.0, 12.0, 30.0, 52.0, 72.0)[official]
     season_start, season_end = config.get("season_start_md", ""), config.get("season_end_md", "")
+    in_season = False
     if season_start and season_end:
         current_md = (now_local.month, now_local.day)
         start_md = tuple(map(int, season_start.split("-")))
@@ -252,13 +253,15 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     else:
         reasons.append("尚未录入当地柏科花粉预报；季节和天气不能单独证明空气中花粉浓度")
 
+    weather_context_active = in_season or official > 0 or social > 0
     weather_score = 0.0
-    if weather and isinstance(weather.get("current"), dict):
+    if weather and not weather_context_active:
+        reasons.append("天气背景未计入花粉风险：尚无当地花粉季、有效柏科预报或有效人工趋势信号")
+    if weather and weather_context_active and isinstance(weather.get("current"), dict):
         current = weather["current"]
         temp = _finite_number(current.get("temperature_2m"))
         rain = _finite_number(current.get("precipitation"))
         cloud = _finite_number(current.get("cloud_cover"))
-        wind = _finite_number(current.get("wind_speed_10m"))
         if temp is not None and 5 <= temp <= 22:
             weather_score += 6
             reasons.append(f"气温 {temp:g}°C 处于可能有利的释放温区（仅作弱辅助）")
@@ -268,9 +271,6 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         elif rain is not None and cloud is not None and cloud < 35:
             weather_score += 5
             reasons.append("当前少云/晴朗，轻微上调释放与扩散可能性")
-        if wind is not None and 1 <= wind <= 6:
-            weather_score += 2
-            reasons.append("轻风条件对花粉扩散只作微弱辅助判断")
         # Rain/sunshine effects are bounded and never replace direct pollen evidence.
         forecast = weather.get("daily", {})
         forecast = forecast if isinstance(forecast, dict) else {}
@@ -295,13 +295,6 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
                     and today_sun is not None and today_sun >= 6 and temp is not None and 5 <= temp <= 22):
                 weather_score += 3
                 reasons.append("前一日降雨后转为温暖晴朗，释放/扩散可能性仅作轻微上调")
-            recent_days = range(max(0, today_index - 3), today_index + 1)
-            if (len(list(recent_days)) == 4 and all(i < len(sunny) and i < len(rain_sum)
-                    and (sun_s := _finite_number(sunny[i])) is not None and sun_s / 3600 >= 8
-                    and (rain_i := _finite_number(rain_sum[i])) is not None and rain_i < 1
-                    for i in recent_days)):
-                weather_score -= 3  # weak lagged proxy; future sunshine is not prior pollen depletion
-                reasons.append("过去四天持续晴朗，潜在花粉释放量只作轻微折减，不替代实测预报")
         score += max(-12, min(12, weather_score))
 
     if social:
@@ -335,7 +328,7 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     forecast_score = score
     forecast_hours_used = 0
     forecast_weather_adjustment = 0.0
-    if weather and isinstance(weather.get("hourly"), dict):
+    if weather and weather_context_active and isinstance(weather.get("hourly"), dict):
         hourly = weather["hourly"]
         times = hourly.get("time", [])
         temps = hourly.get("temperature_2m", [])
@@ -408,6 +401,7 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             "tier_label": {"weak": "弱", "normal": "正常", "high": "高", "extreme": "极高"}[tier],
             "forecast_hours_used": forecast_hours_used,
             "forecast_weather_adjustment": forecast_weather_adjustment,
+            "weather_context_active": weather_context_active,
             "reasons": reasons, "evening_boost": evening, "preboost_active": preboost,
             "residual_active": residual_active, "residual_remaining_hours": round(residual_remaining_h, 2),
             "as_of": now_local.isoformat(),

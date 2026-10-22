@@ -415,9 +415,20 @@ class SmartControlTests(unittest.TestCase):
         self.assertGreater(smart.assess(config, dry, now)["score"], smart.assess(config, wet, now)["score"])
         self.assertGreaterEqual(smart.assess(config, wet, now)["score"], 0)
 
-    def test_rain_to_sun_and_past_sunny_streak_are_distinct_bounded_signals(self):
+    def test_wind_speed_alone_is_not_used_as_a_positive_pollen_proxy(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
-        config = smart.normalize_config({})
+        config = smart.normalize_config({"season_start_md": "03-01", "season_end_md": "05-01"})
+        fetched = int(now.timestamp() * 1000)
+        low_wind = {"fetched_at_ms": fetched, "current": {"temperature_2m": 15,
+            "precipitation": 0, "cloud_cover": 80, "wind_speed_10m": 2}}
+        high_wind = {"fetched_at_ms": fetched, "current": {"temperature_2m": 15,
+            "precipitation": 0, "cloud_cover": 80, "wind_speed_10m": 15}}
+        self.assertEqual(smart.assess(config, low_wind, now)["score"],
+                         smart.assess(config, high_wind, now)["score"])
+
+    def test_rain_to_sun_is_bounded_and_sunny_streak_does_not_assume_depletion(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({"season_start_md": "03-01", "season_end_md": "05-01"})
         current = {"temperature_2m": 15, "precipitation": 0, "cloud_cover": 80}
         times = ["2026-03-28", "2026-03-29", "2026-03-30", "2026-03-31", "2026-04-01",
                  "2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05"]
@@ -437,8 +448,37 @@ class SmartControlTests(unittest.TestCase):
         future_only = {"current": current, "fetched_at_ms": fetched_at_ms, "daily": {"time": times,
             "sunshine_duration_s": [0, 0, 0, 0, 36000, 36000, 36000, 36000, 36000],
             "precipitation_sum_mm": [0] * 9}}
+        # Four sunny days are not treated as evidence that airborne pollen
+        # has been depleted; that should come from measured/official decline.
         self.assertEqual(smart.assess(config, past_streak, now)["score"],
-                         smart.assess(config, future_only, now)["score"] - 3)
+                         smart.assess(config, future_only, now)["score"])
+
+    def test_weather_alone_cannot_raise_risk_outside_a_pollen_context(self):
+        now = datetime(2026, 7, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        fetched = int(now.timestamp() * 1000)
+        weather = {
+            "fetched_at_ms": fetched, "timezone": "Asia/Shanghai",
+            "current": {"temperature_2m": 20, "precipitation": 0,
+                        "cloud_cover": 10, "wind_speed_10m": 3},
+            "hourly": {
+                "time": [f"2026-07-01T{hour:02d}:00" for hour in range(24)],
+                "temperature_2m": [20] * 24,
+                "precipitation_probability": [0] * 24,
+                "cloud_cover": [10] * 24,
+            },
+            "daily": {"time": ["2026-07-01"], "sunshine_duration_s": [36000],
+                      "precipitation_sum_mm": [0]},
+        }
+        no_pollen_context = smart.assess(smart.normalize_config({}), weather, now)
+        self.assertFalse(no_pollen_context["weather_context_active"])
+        self.assertEqual(no_pollen_context["score"], 0)
+        self.assertEqual(no_pollen_context["forecast_score_6h"], 0)
+        self.assertEqual(smart.desired_tier(no_pollen_context), "weak")
+
+        local_season = smart.normalize_config({"season_start_md": "03-01", "season_end_md": "05-01"})
+        in_season = smart.assess(local_season, weather, datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai")))
+        self.assertTrue(in_season["weather_context_active"])
+        self.assertGreater(in_season["score"], 0)
 
     def test_stale_missing_or_future_weather_timestamp_is_ignored(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -459,8 +499,8 @@ class SmartControlTests(unittest.TestCase):
 
     def test_missing_weather_fields_are_unknown_not_clear_sky(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
-        config = smart.normalize_config({})
         fetched = int(now.timestamp() * 1000)
+        config = smart.normalize_config({"official_level": 1, "official_updated_at": fetched})
         baseline = smart.assess(config, None, now)
         missing = {"fetched_at_ms": fetched, "current": {"temperature_2m": 15,
             "precipitation": None, "cloud_cover": None},

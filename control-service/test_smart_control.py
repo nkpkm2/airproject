@@ -21,8 +21,8 @@ class SmartControlTests(unittest.TestCase):
         script = (console / "fleet.js").read_text(encoding="utf-8")
         self.assertIn('id="official-signal-refresh"', page)
         self.assertIn('id="social-signal-refresh"', page)
-        self.assertIn("fleet.css?v=20261022-smart11", page)
-        self.assertIn("fleet.js?v=20261022-smart11", page)
+        self.assertIn("fleet.css?v=20261022-smart12", page)
+        self.assertIn("fleet.js?v=20261022-smart12", page)
         self.assertIn("saveSmart($('smart-enabled').checked,'official')", script)
         self.assertIn("saveSmart($('smart-enabled').checked,'social')", script)
 
@@ -315,6 +315,7 @@ class SmartControlTests(unittest.TestCase):
         page = "<html><p>发布时间：2026年4月1日</p><p>柏科花粉浓度极高，侧柏进入散粉高峰</p><p>4月5日至8日柏科花粉预计进入高峰</p></html>"
         parsed = smart.parse_official_pollen_page(page, now)
         self.assertEqual(parsed["level"], 4)
+        self.assertEqual(parsed["level_precision"], "explicit")
         self.assertEqual(parsed["predicted_peak_at"], "2026-04-05T10:00:00+08:00")
         stale = page.replace("2026年4月1日", "2026年3月20日")
         with self.assertRaisesRegex(ValueError, "最近 7 天"):
@@ -386,6 +387,7 @@ class SmartControlTests(unittest.TestCase):
                 )
                 parsed_band = smart.parse_official_pollen_page(band_page, now)
                 self.assertEqual(parsed_band["level"], expected_level)
+                self.assertEqual(parsed_band["level_precision"], "range_lower_bound")
 
         em_dash_window = (
             "<p>发布日期：2026年4月1日</p>"

@@ -335,6 +335,8 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     forecast_score = score
     forecast_hours_used = 0
     forecast_weather_adjustment = 0.0
+    forecast_components = {"warm_clear_hours": 0, "low_humidity_hours": 0,
+                           "high_precipitation_probability_hours": 0}
     if weather and weather_context_active and isinstance(weather.get("hourly"), dict):
         hourly = weather["hourly"]
         times = hourly.get("time", [])
@@ -375,15 +377,22 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             if (temp is not None and 5 <= temp <= 22 and rain_probability is not None
                     and rain_probability < 30 and cloud is not None and cloud < 45):
                 delta += 1
+                forecast_components["warm_clear_hours"] += 1
             if humidity is not None and humidity < 40:
                 delta += 1
-            if rain_probability is not None and rain_probability >= 60: delta -= 2
+                forecast_components["low_humidity_hours"] += 1
+            if rain_probability is not None and rain_probability >= 60:
+                delta -= 2
+                forecast_components["high_precipitation_probability_hours"] += 1
         forecast_hours_used = len(forecast_indices)
         forecast_score = max(score, max(0, min(100, score + max(-6, min(6, delta)))))
         forecast_weather_adjustment = round(forecast_score - score, 1)
         if forecast_hours_used:
             reasons.append(
-                f"未来 6 小时天气参考 {forecast_hours_used} 个整点样本，"
+                f"未来 6 小时天气参考 {forecast_hours_used} 个整点样本"
+                f"（温暖晴朗 {forecast_components['warm_clear_hours']} 小时、"
+                f"低湿 {forecast_components['low_humidity_hours']} 小时、"
+                f"高降水概率 {forecast_components['high_precipitation_probability_hours']} 小时），"
                 f"预测评分净上调 {forecast_weather_adjustment:g} 分（上限 +6；天气不会下调当前花粉等级）"
             )
     preboost = False
@@ -413,6 +422,7 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             "tier_label": {"weak": "弱", "normal": "正常", "high": "高", "extreme": "极高"}[tier],
             "forecast_hours_used": forecast_hours_used,
             "forecast_weather_adjustment": forecast_weather_adjustment,
+            "forecast_components": forecast_components,
             "weather_context_active": weather_context_active,
             "reasons": reasons, "evening_boost": evening, "preboost_active": preboost,
             "residual_active": residual_active, "residual_remaining_hours": round(residual_remaining_h, 2),

@@ -555,6 +555,9 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(risk["forecast_score_6h"], 36)
         self.assertEqual(risk["forecast_hours_used"], 6)
         self.assertEqual(risk["forecast_weather_adjustment"], 6)
+        self.assertEqual(risk["forecast_components"], {
+            "warm_clear_hours": 6, "low_humidity_hours": 0,
+            "high_precipitation_probability_hours": 0})
         self.assertTrue(any("6 个整点样本" in reason for reason in risk["reasons"]))
 
         # Conversely, future rain must be considered even if the first six
@@ -568,6 +571,7 @@ class SmartControlTests(unittest.TestCase):
         rainy_future = smart.assess(config, weather, now)
         # A wetter outlook must not lower today's direct pollen assessment.
         self.assertEqual(rainy_future["forecast_score_6h"], 30)
+        self.assertEqual(rainy_future["forecast_components"]["high_precipitation_probability_hours"], 6)
 
     def test_malformed_weather_shapes_and_nonfinite_values_do_not_crash_or_boost(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))

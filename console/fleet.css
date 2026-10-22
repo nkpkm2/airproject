@@ -1,7 +1,7 @@
 :root{
   --face:#c0c0c0;--light:#fff;--mid:#dfdfdf;--shadow:#808080;--dark:#000;
   --title:#000080;--select:#000080;--desktop:#008080;
-  --low:#00a000;--medium:#0066cc;--high:#ffd000;--auto1:#9a35d1;
+  --low:#00a000;--medium:#0066cc;--high:#ffd000;--auto1:#9a35d1;--uninstalled:#a34dcc;
   --off:#d92828;--offline:#777;
   font-family:Tahoma,"MS Sans Serif",Arial,sans-serif;color:#000;background:var(--desktop)
 }
@@ -21,7 +21,7 @@ input[type=checkbox]{accent-color:#000080}
 .view-nav a{height:26px;padding:5px 11px;color:#000;text-decoration:none;background:var(--face);border:2px solid;border-color:var(--light) var(--dark) var(--dark) var(--light);box-shadow:inset 1px 1px var(--mid),inset -1px -1px var(--shadow)}
 .top-summary{margin-left:auto;display:flex;align-items:center;gap:10px;white-space:nowrap;padding-right:5px}
 .top-summary b{font-size:14px}.divider{height:24px;border-left:1px solid var(--shadow);border-right:1px solid #fff}
-.legend{display:flex;align-items:center;gap:4px;color:#222}.legend i{width:10px;height:10px;border:1px solid #000;display:inline-block;margin-left:3px}.legend .low{background:var(--low)}.legend .medium{background:var(--medium)}.legend .high{background:var(--high)}.legend .auto{background:var(--auto1)}.legend .off{background:var(--off)}.legend .offline{background:var(--offline)}
+.legend{display:flex;align-items:center;gap:4px;color:#222}.legend i{width:10px;height:10px;border:1px solid #000;display:inline-block;margin-left:3px}.legend .low{background:var(--low)}.legend .medium{background:var(--medium)}.legend .high{background:var(--high)}.legend .auto{background:var(--auto1)}.legend .uninstalled{background:var(--uninstalled)}.legend .off{background:var(--off)}.legend .offline{background:var(--offline)}
 .shell{height:calc(100vh - 70px);min-height:590px;margin:0 6px 6px;display:grid;grid-template-columns:270px 1fr;gap:6px;padding:6px;background:var(--face);border:2px solid;border-color:var(--light) var(--dark) var(--dark) var(--light)}
 .library,.home{min-height:0;background:var(--face);border:2px solid;border-color:var(--shadow) var(--light) var(--light) var(--shadow);box-shadow:inset 1px 1px #000}
 .library{display:flex;flex-direction:column;padding:7px}
@@ -39,6 +39,8 @@ input[type=checkbox]{accent-color:#000080}
 .device-main{flex:1;min-width:0;display:grid;grid-template-columns:28px 1fr auto;align-items:center;gap:6px;padding:5px;border:0;box-shadow:none;background:transparent;text-align:left;color:inherit}
 .device-main:active{padding:5px;border:0;box-shadow:none}.device-dot{display:block;width:20px;height:20px;border:2px solid;border-color:#fff #404040 #404040 #fff;background:var(--state);box-shadow:1px 1px #000}
 .device-name{display:block;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.device-meta{display:block;margin-top:3px;font-size:11px;color:#555}.selected .device-meta{color:#fff}.card-status{font-size:11px;white-space:nowrap;padding-right:2px}
+.device-card.uninstalled .device-dot,.device-card.unknown .device-dot,.plan-device.uninstalled .device-dot,.plan-device.unknown .device-dot{animation:uninstalled-pulse 1.8s ease-in-out infinite}
+@keyframes uninstalled-pulse{0%,100%{opacity:.55;filter:saturate(.8)}50%{opacity:1;filter:saturate(1.35) brightness(1.15)}}
 .pending .device-dot{animation:pending .55s steps(2,end) infinite}@keyframes pending{50%{outline:2px dotted #000;outline-offset:2px;filter:brightness(1.4)}}
 .library-note{height:61px;margin:6px 0 0;padding:5px;overflow:hidden;line-height:15px;background:#ffffe1;border:1px solid #000}
 .home{display:flex;flex-direction:column;padding:7px}.home-head{height:60px;flex:0 0 60px;padding:2px 4px 7px;border-bottom:1px solid var(--shadow)}

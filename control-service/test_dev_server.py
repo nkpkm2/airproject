@@ -1,5 +1,6 @@
 import importlib.util
 import unittest
+from collections import deque
 from pathlib import Path
 from unittest.mock import patch
 
@@ -175,6 +176,52 @@ class DeviceCatalogTests(unittest.TestCase):
             },
         })
         self.assertEqual(config["channels"]["medium"]["clear_threshold_mv"], 52)
+
+
+class LampModeInferenceTests(unittest.TestCase):
+    def setUp(self):
+        self.config = {
+            "calibration": {
+                "channels": {
+                    key: {"direction": "rising", "threshold_mv": 100,
+                          "on_threshold_mv": 500, "off_threshold_mv": 200,
+                          "clear_threshold_mv": 200, "quality": "pass"}
+                    for key in ("low", "medium", "high", "auto")
+                }
+            }
+        }
+
+    def derive(self, values, history=None):
+        record = {"state": {"mode": "unknown", "powered": True}}
+        record["_lamp_observations"] = deque(history or [{"observed_at_ms": 1000, "adc_mv": values}])
+        return server.derive_lamp_state(record, self.config, 2000)
+
+    def test_single_constant_mode_wins_over_flashing_auto(self):
+        history = [
+            {"observed_at_ms": 1000, "adc_mv": [800, 20, 20, 800]},
+            {"observed_at_ms": 1800, "adc_mv": [800, 20, 20, 20]},
+            {"observed_at_ms": 2600, "adc_mv": [800, 20, 20, 800]},
+        ]
+        result = self.derive(history[-1]["adc_mv"], history)
+        self.assertEqual(result["mode"], "low")
+        self.assertTrue(result["auto_blinking"])
+        self.assertEqual(result["install_status"], "installed")
+
+    def test_multiple_mode_lamps_are_uninstalled(self):
+        result = self.derive([800, 800, 20, 20])
+        self.assertEqual(result["mode"], "uninstalled")
+        self.assertEqual(result["reason"], "multiple_mode_lamps_on")
+
+    def test_constant_mode_and_constant_auto_are_uninstalled(self):
+        result = self.derive([800, 20, 20, 800])
+        self.assertEqual(result["mode"], "uninstalled")
+        self.assertEqual(result["reason"], "mode_and_auto_steady")
+
+    def test_auto_only_is_auto_and_all_dark_is_off(self):
+        self.assertEqual(self.derive([20, 20, 20, 800])["mode"], "auto")
+        dark = self.derive([20, 20, 20, 20])
+        self.assertEqual(dark["mode"], "off")
+        self.assertEqual(dark["install_status"], "dark_or_off")
 
 
 class EngineeringToolTests(unittest.TestCase):

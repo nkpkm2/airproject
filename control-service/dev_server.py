@@ -24,6 +24,8 @@ MAX_COMMAND_HISTORY = 50
 RUNTIME_ID = uuid4().hex
 CATALOG_PATH = ROOT / "data" / "device_catalog.json"
 DEFAULT_ROOMS = ["客厅", "餐厅", "主卧", "次卧", "书房", "厨房", "玄关 / 走廊"]
+LAMP_KEYS = ("low", "medium", "high", "auto")
+LAMP_INDEX = {key: index for index, key in enumerate(LAMP_KEYS)}
 
 def canonical_device_id(value: object) -> str:
     """Use one immutable identity for both raw-MAC serial and MQTT IDs."""
@@ -171,6 +173,96 @@ def normalize_calibration_config(device_id: str, source: object) -> dict:
         "channels": channels,
         "quality": dict(source.get("quality", {})) if isinstance(source.get("quality"), dict) else {},
     }
+
+def classify_calibrated_lamp(channel: dict, value: object, previous: str | None = None) -> str | None:
+    """Classify one raw ADC value using the same safe hysteresis as the UI."""
+    if not isinstance(channel, dict) or channel.get("quality") not in {None, "pass"}: return None
+    try: value = float(value)
+    except (TypeError, ValueError): return None
+    if not (-100_000 <= value <= 100_000): return None
+    rising = channel.get("direction") != "falling"
+    on = channel.get("on_threshold_mv", channel.get("threshold_mv"))
+    configured_off = channel.get("off_threshold_mv", channel.get("threshold_mv"))
+    try: on, configured_off = float(on), float(configured_off)
+    except (TypeError, ValueError): return None
+    off_median = channel.get("off_median_mv")
+    on_median = channel.get("on_median_mv")
+    off_sigma = max(0.0, float(channel.get("off_sigma_mv") or 0))
+    try: off_median = float(off_median) if off_median is not None else None
+    except (TypeError, ValueError): off_median = None
+    try: on_median = float(on_median) if on_median is not None else None
+    except (TypeError, ValueError): on_median = None
+    span = abs(on_median - off_median) if off_median is not None and on_median is not None else 0
+    dark_margin = max(3 * off_sigma, min(50, span * 0.03), 2) if off_median is not None else 0
+    try: off = float(channel.get("clear_threshold_mv"))
+    except (TypeError, ValueError): off = configured_off
+    if rising:
+        off = max(configured_off, off_median + dark_margin if off_median is not None else float(channel.get("threshold_mv", configured_off)), 0)
+    else:
+        off = min(configured_off, off_median - dark_margin if off_median is not None else 3300)
+    # Older configs with a negative fitted off edge have no distribution
+    # statistics. Until recalibration, use the on edge as the clear edge.
+    if off_median is None or on_median is None:
+        if rising and configured_off < 0: off = max(off, on)
+        if not rising and configured_off > 3300: off = min(off, on)
+    if previous == "on": return "on" if (value > off if rising else value < off) else "off"
+    return "on" if (value >= on if rising else value <= on) else "off"
+
+def remember_lamp_observation(record: dict, body: object, observed_at: int) -> None:
+    if not isinstance(body, dict) or not isinstance(body.get("adc_mv"), list): return
+    values = body.get("adc_mv", [])[:4]
+    if len(values) != 4: return
+    record.setdefault("_lamp_observations", deque(maxlen=180)).append({
+        "observed_at_ms": observed_at,
+        "adc_mv": values,
+    })
+
+def derive_lamp_state(record: dict, profile: dict, now: int) -> dict:
+    """Derive purifier mode from calibrated lamp states, including auto flicker."""
+    raw = record.get("state") if isinstance(record.get("state"), dict) else {}
+    calibration = profile.get("calibration") if isinstance(profile, dict) else None
+    channels = calibration.get("channels") if isinstance(calibration, dict) else None
+    observations = list(record.get("_lamp_observations", ()))
+    if not observations and isinstance(raw.get("adc_mv"), list):
+        observations = [{"observed_at_ms": now, "adc_mv": raw.get("adc_mv")}]
+    if not isinstance(channels, dict):
+        raw_mode = raw.get("mode") if raw.get("mode") in (*LAMP_KEYS, "off") else "unknown"
+        return {"mode": raw_mode, "powered": bool(raw.get("powered")), "install_status": "unknown", "lamps": {}, "auto_blinking": False, "reason": "no_calibration"}
+    previous = {key: None for key in LAMP_KEYS}
+    classified = []
+    for observation in observations:
+        values = observation.get("adc_mv", [])
+        states = {}
+        for key in LAMP_KEYS:
+            states[key] = classify_calibrated_lamp(channels.get(key), values[LAMP_INDEX[key]] if len(values) == 4 else None, previous[key])
+        previous = states
+        classified.append({"at": observation.get("observed_at_ms", now), "lamps": states})
+    latest = classified[-1]["lamps"] if classified else {key: None for key in LAMP_KEYS}
+    auto_transitions = 0
+    last_auto = None
+    recent_cutoff = now - 2_400
+    for item in classified:
+        if item["at"] < recent_cutoff or item["lamps"].get("auto") is None: continue
+        value = item["lamps"]["auto"]
+        if last_auto is not None and value != last_auto: auto_transitions += 1
+        last_auto = value
+    auto_blinking = auto_transitions >= 2
+    base_on = [key for key in ("low", "medium", "high") if latest.get(key) == "on"]
+    known = all(latest.get(key) is not None for key in LAMP_KEYS)
+    if not known:
+        raw_mode = raw.get("mode") if raw.get("mode") in (*LAMP_KEYS, "off") else "unknown"
+        return {"mode": raw_mode, "powered": bool(raw.get("powered")), "install_status": "unknown", "lamps": latest, "auto_blinking": auto_blinking, "reason": "incomplete_adc"}
+    if len(base_on) > 1:
+        return {"mode": "uninstalled", "powered": True, "install_status": "uninstalled", "lamps": latest, "auto_blinking": auto_blinking, "reason": "multiple_mode_lamps_on"}
+    if len(base_on) == 1:
+        if latest.get("auto") == "off" or auto_blinking:
+            return {"mode": base_on[0], "powered": True, "install_status": "installed", "lamps": latest, "auto_blinking": auto_blinking, "reason": "constant_mode_priority"}
+        return {"mode": "uninstalled", "powered": True, "install_status": "uninstalled", "lamps": latest, "auto_blinking": auto_blinking, "reason": "mode_and_auto_steady"}
+    if latest.get("auto") == "on" or auto_blinking:
+        return {"mode": "auto", "powered": True, "install_status": "installed", "lamps": latest, "auto_blinking": auto_blinking, "reason": "auto_only"}
+    # All four dark is intentionally represented as off: the sensor system
+    # cannot distinguish a powered purifier with uninstalled lamps from off.
+    return {"mode": "off", "powered": False, "install_status": "dark_or_off", "lamps": latest, "auto_blinking": False, "reason": "all_lamps_dark"}
 
 def public_catalog() -> dict:
     return {
@@ -338,6 +430,8 @@ def subscribe() -> None:
                     observed_at = int(time.time() * 1000)
                     record["last_seen_ms"] = observed_at
                     record[f"_{category}_seen_ms"] = observed_at
+                    if category in {"state", "telemetry"}:
+                        remember_lamp_observation(record, body, observed_at)
                     if category == "telemetry":
                         track_telemetry(record, body, observed_at)
                     elif category == "ack" and isinstance(body, dict):
@@ -426,6 +520,7 @@ class Handler(BaseHTTPRequestHandler):
                     record["last_seen_age_ms"] = age
                     record["heartbeat_age_ms"] = signal_age
                     record["connection_state"] = connection_state
+                    record["derived_state"] = derive_lamp_state(source, profile, now)
                     # Degraded devices remain present in the fleet count. One
                     # delayed heartbeat must not make a real appliance vanish.
                     record["online"] = connection_state != "offline"

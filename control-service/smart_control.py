@@ -459,6 +459,7 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
     elif re.search(r"低浓度|较低|偏低|\b1\s*级\b|低风险", context): level = 1
     else: raise ValueError("公告提到柏科但没有可判读的浓度级别/高峰信息")
     peak_at = None
+    peak_until = None
     date_pattern = re.compile(
         r"(?:(20\d{2})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]"
         r"(?:\s*(?:至|到|[-~～])\s*(?:(20\d{2})\s*年\s*)?(?:(\d{1,2})\s*月\s*)?(\d{1,2})\s*[日号])?"
@@ -478,17 +479,28 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
                 month = int(first_month)
                 day = int(first_day)
                 forecast_day = date(year, month, day)
-                if forecast_day < published.date(): continue
                 # A date range such as “3月17日至21日” omits the second month/year.
+                end_day = forecast_day
                 if second_day:
-                    date(int(second_year or year), int(second_month or month), int(second_day))
+                    end_year = int(second_year or year)
+                    end_month = int(second_month or month)
+                    if not second_year and end_month < month:
+                        end_year += 1
+                    end_day = date(end_year, end_month, int(second_day))
+                # Forecast windows may already have started when an article is
+                # published. Keep an ongoing range; reject only windows fully
+                # in the past so their peak can still be shown to the operator.
+                if end_day < published.date(): continue
                 peak_at = datetime(year, month, day, 10, 0, tzinfo=published.tzinfo).isoformat()
+                peak_until = datetime(end_day.year, end_day.month, end_day.day,
+                                      10, 0, tzinfo=published.tzinfo).isoformat()
                 break
             except (TypeError, ValueError):
                 continue
         if peak_at: break
     return {"level": level, "published_at_ms": int(published.timestamp() * 1000),
-            "predicted_peak_at": peak_at, "peak_time_precision": "date_window_start_10_local" if peak_at else None,
+            "predicted_peak_at": peak_at, "predicted_peak_until": peak_until,
+            "peak_time_precision": "date_window_10_local" if peak_at else None,
             "evidence": context[:600], "age_days": round(age_days, 2)}
 
 

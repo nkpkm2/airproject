@@ -205,6 +205,13 @@ class SmartControlTests(unittest.TestCase):
             official_style, datetime(2026, 3, 17, 8, tzinfo=ZoneInfo("Asia/Shanghai")))
         self.assertEqual(parsed_peak["level"], 3)
         self.assertEqual(parsed_peak["predicted_peak_at"], "2026-03-17T10:00:00+08:00")
+        self.assertEqual(parsed_peak["predicted_peak_until"], "2026-03-21T10:00:00+08:00")
+
+        ongoing_window = official_style.replace("2026-03-17", "2026-03-19")
+        parsed_ongoing = smart.parse_official_pollen_page(
+            ongoing_window, datetime(2026, 3, 20, 8, tzinfo=ZoneInfo("Asia/Shanghai")))
+        self.assertEqual(parsed_ongoing["predicted_peak_at"], "2026-03-17T10:00:00+08:00")
+        self.assertEqual(parsed_ongoing["predicted_peak_until"], "2026-03-21T10:00:00+08:00")
 
     def test_official_page_fetch_is_limited_to_https_gov_cn(self):
         self.assertEqual(server.validate_official_pollen_url("https://www.beijing.gov.cn/a/b.html"),

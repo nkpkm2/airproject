@@ -105,6 +105,22 @@ def restarted_pulse_recovery(inflight: dict, current_mode: str, state_seen_ms: i
         return "confirmed"
     return "uncertain" if now_ms - sent_at_ms > 12_000 else "wait"
 
+def observe_external_mode_change(action_state: dict, current_mode: str, now_ms: int,
+                                 expected_mode: str | None = None) -> bool:
+    """Respect physical/other-controller mode changes for a 30-minute window."""
+    valid_modes = (*smart_control.MODES, "off")
+    if current_mode not in valid_modes: return False
+    previous = action_state.get("last_observed_mode")
+    action_state["last_observed_mode"] = current_mode
+    if previous not in valid_modes or previous == current_mode: return False
+    expected = (expected_mode == current_mode or
+                (expected_mode == "active" and current_mode in smart_control.MODES))
+    if expected: return False
+    action_state.update(manual_override_until_ms=max(
+        int(action_state.get("manual_override_until_ms", 0)), now_ms + 30 * 60 * 1000),
+        status="检测到实体按键或其他控制改档，自动调控让出 30 分钟")
+    return True
+
 def canonical_device_id(value: object) -> str:
     """Use one immutable identity for both raw-MAC serial and MQTT IDs."""
     text = str(value or "").strip()[:96]
@@ -643,6 +659,10 @@ def smart_controller_loop() -> None:
                     derived = derive_lamp_state(record, profile, now_ms)
                     current_mode = derived.get("mode", "unknown")
                     inflight = action_state.get("inflight")
+                    expected_mode = inflight.get("expected") if isinstance(inflight, dict) else None
+                    if observe_external_mode_change(action_state, current_mode, now_ms, expected_mode):
+                        action_state.update(inflight=None, manual_target_mode=None, manual_target_until_ms=0)
+                        continue
                     if inflight:
                         if inflight.get("restart_recovery"):
                             recovery = restarted_pulse_recovery(

@@ -36,6 +36,21 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(server.restarted_pulse_recovery({"sent_at_ms": "bad"}, "low", 2_000, True, 3_000),
                          "uncertain")
 
+    def test_physical_mode_changes_yield_to_manual_control_but_expected_steps_do_not(self):
+        action = {}
+        now_ms = 1_000_000
+        self.assertFalse(server.observe_external_mode_change(action, "low", now_ms))
+        self.assertFalse(server.observe_external_mode_change(action, "low", now_ms + 5_000))
+        self.assertFalse(server.observe_external_mode_change(action, "medium", now_ms + 10_000,
+                                                              expected_mode="medium"))
+        self.assertNotIn("manual_override_until_ms", action)
+        self.assertTrue(server.observe_external_mode_change(action, "high", now_ms + 15_000))
+        self.assertEqual(action["manual_override_until_ms"], now_ms + 15_000 + 30 * 60 * 1000)
+        self.assertIn("实体按键", action["status"])
+        self.assertFalse(server.observe_external_mode_change(action, "off", now_ms + 20_000,
+                                                              expected_mode="off"))
+        self.assertEqual(action["manual_override_until_ms"], now_ms + 15_000 + 30 * 60 * 1000)
+
     def test_smart_runtime_checkpoint_persists_intent_but_not_ephemeral_queue_or_weather(self):
         runtime = {"weather": {"current": {"temperature_2m": 15}},
                    "device_actions": {"pur-test": {

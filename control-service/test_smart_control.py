@@ -262,6 +262,45 @@ class SmartControlTests(unittest.TestCase):
         self.assertTrue(result["preboost_active"])
         self.assertEqual(result["forecast_tier_6h"], "extreme")
 
+    def test_indoor_residual_tail_holds_normal_target_for_configured_duration(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({"residual_hours": 18})
+        for age_hours in (0.25, 2, 9, 17.99):
+            with self.subTest(age_hours=age_hours):
+                peak_at = now.timestamp() - age_hours * 3600
+                risk = smart.assess(config, None, now, previous_peak_at=peak_at)
+                self.assertTrue(risk["residual_active"])
+                self.assertEqual(smart.desired_tier(risk), "normal")
+        expired = smart.assess(config, None, now, previous_peak_at=now.timestamp() - 18 * 3600)
+        self.assertFalse(expired["residual_active"])
+        self.assertEqual(smart.desired_tier(expired), "weak")
+
+    def test_desired_tier_combines_forecast_preboost_and_residual_floor(self):
+        self.assertEqual(smart.desired_tier({"tier": "weak", "forecast_tier_6h": "high"}), "high")
+        self.assertEqual(smart.desired_tier({"tier": "normal", "forecast_tier_6h": "weak"}), "normal")
+        self.assertEqual(smart.desired_tier({"tier": "weak", "forecast_tier_6h": "weak",
+                                             "residual_active": True}), "normal")
+
+    def test_peak_decay_simulation_holds_cleanup_then_downshifts_without_chatter(self):
+        current, candidate, candidate_since = "weak", "weak", 0.0
+        peak_at = None
+        transitions = []
+        start = 1_000_000.0
+        for minute in range(0, 26 * 60, 5):
+            now_s = start + minute * 60
+            direct = "high" if minute <= 60 else "weak"
+            if direct == "high": peak_at = now_s
+            residual = peak_at is not None and now_s - peak_at < 18 * 3600
+            desired = smart.desired_tier({"tier": direct, "forecast_tier_6h": "weak",
+                                           "residual_active": residual})
+            previous = current
+            current, candidate, candidate_since = smart.apply_hysteresis(
+                current, candidate, candidate_since, desired, now_s)
+            if current != previous: transitions.append((minute, current))
+        self.assertEqual([tier for _, tier in transitions], ["high", "normal", "weak"])
+        self.assertGreaterEqual(transitions[1][0], 90)
+        self.assertGreaterEqual(transitions[2][0], 60 + 18 * 60 + 90)
+
     def test_enable_requires_location(self):
         with self.assertRaisesRegex(ValueError, "坐标"):
             smart.normalize_config({"enabled": True})

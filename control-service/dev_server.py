@@ -604,8 +604,7 @@ def smart_controller_loop() -> None:
             if not pollen_signal or pollen_signal.get("source_url") != pollen_url: pollen_signal = None
             risk = smart_control.assess(config, weather, previous_peak_at=SMART_RUNTIME.get("last_peak_at") or None,
                                         official_signal=pollen_signal)
-            rank = {name: index for index, name in enumerate(smart_control.LEVELS)}
-            desired = max(risk["tier"], risk["forecast_tier_6h"], key=lambda item: rank[item])
+            desired = smart_control.desired_tier(risk)
             current = SMART_RUNTIME.get("effective_tier", "weak")
             candidate = SMART_RUNTIME.get("candidate_tier", current)
             candidate_since = float(SMART_RUNTIME.get("candidate_since", 0))
@@ -617,7 +616,7 @@ def smart_controller_loop() -> None:
             SMART_RUNTIME["candidate_tier"] = next_candidate
             SMART_RUNTIME["candidate_since"] = next_candidate_since
             effective = SMART_RUNTIME.get("effective_tier", "weak")
-            if effective in {"high", "extreme"}:
+            if risk["tier"] in {"high", "extreme"} or risk["forecast_tier_6h"] in {"high", "extreme"}:
                 SMART_RUNTIME["last_peak_at"] = now_s
             now_ms = int(now_s * 1000)
             action_map = SMART_RUNTIME.setdefault("device_actions", {})

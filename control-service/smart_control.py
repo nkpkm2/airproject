@@ -256,11 +256,20 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         # trigger an extreme tier.
         score += social * 4
         reasons.append(f"过敏/花粉社交信号级别 {social}/3（权重上限 12%，需人工核验）")
+    residual_active = False
+    residual_remaining_h = 0.0
     if previous_peak_at and config.get("residual_hours", 0) > 0:
-        age_h = max(0.0, (now_local.timestamp() - previous_peak_at) / 3600)
-        residual = min(18.0, 18.0 * max(0.0, 1 - age_h / float(config["residual_hours"])))
-        score = max(score, residual)
-        if residual >= 2: reasons.append(f"室内沉降/滞留余效仍在衰减（约 {residual:.0f}/18 分）")
+        try:
+            age_h = (now_local.timestamp() - float(previous_peak_at)) / 3600
+        except (TypeError, ValueError):
+            age_h = -1.0
+        if 0 <= age_h < float(config["residual_hours"]):
+            residual_active = True
+            residual_remaining_h = float(config["residual_hours"]) - age_h
+            residual = min(18.0, 18.0 * max(0.0, 1 - age_h / float(config["residual_hours"])))
+            score = max(score, residual)
+            reasons.append(f"花粉峰后室内清洁余效中（剩余约 {residual_remaining_h:.1f} 小时）")
+            if residual >= 2: reasons.append(f"室内沉降/滞留余效评分约 {residual:.0f}/18")
 
     start = daytime.fromisoformat(config.get("evening_start", "17:10"))
     local_clock = now_local.timetz().replace(tzinfo=None)
@@ -310,10 +319,23 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         reasons.append(f"官方预报高峰即将到来，提前 {config.get('preboost_minutes', 45)} 分钟预升档")
     return {"score": score, "forecast_score_6h": forecast_score, "tier": tier, "forecast_tier_6h": forecast_tier,
             "tier_label": {"weak": "弱", "normal": "正常", "high": "高", "extreme": "极高"}[tier],
-            "reasons": reasons, "evening_boost": evening, "preboost_active": preboost, "as_of": now_local.isoformat(),
+            "reasons": reasons, "evening_boost": evening, "preboost_active": preboost,
+            "residual_active": residual_active, "residual_remaining_hours": round(residual_remaining_h, 2),
+            "as_of": now_local.isoformat(),
             "sources": {"official_pollen": official_source,
                         "weather": "Open-Meteo weather forecast" if weather else "unavailable_or_stale",
                         "social": "operator_entry"}}
+
+
+def desired_tier(risk: dict[str, Any]) -> str:
+    """Combine today's risk, short forecast preboost, and indoor cleanup tail."""
+    rank = {name: index for index, name in enumerate(LEVELS)}
+    current = risk.get("tier", "weak")
+    forecast = risk.get("forecast_tier_6h", current)
+    desired = max((current, forecast), key=lambda item: rank.get(item, 0))
+    if risk.get("residual_active") and rank.get(desired, 0) < rank["normal"]:
+        return "normal"
+    return desired
 
 
 def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[str, Any]:

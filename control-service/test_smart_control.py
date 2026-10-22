@@ -21,8 +21,8 @@ class SmartControlTests(unittest.TestCase):
         script = (console / "fleet.js").read_text(encoding="utf-8")
         self.assertIn('id="official-signal-refresh"', page)
         self.assertIn('id="social-signal-refresh"', page)
-        self.assertIn("fleet.css?v=20261022-smart10", page)
-        self.assertIn("fleet.js?v=20261022-smart10", page)
+        self.assertIn("fleet.css?v=20261022-smart11", page)
+        self.assertIn("fleet.js?v=20261022-smart11", page)
         self.assertIn("saveSmart($('smart-enabled').checked,'official')", script)
         self.assertIn("saveSmart($('smart-enabled').checked,'social')", script)
 
@@ -1090,8 +1090,12 @@ class SmartControlTests(unittest.TestCase):
     def test_target_policy_has_explicit_non_auto_speed_cap(self):
         self.assertEqual(smart.target_mode("low", "weak", "extra"), "low")
         self.assertEqual(smart.target_mode("low", "normal", "normal"), "medium")
+        self.assertEqual(smart.target_mode("low", "normal", "high"), "medium")
+        self.assertEqual(smart.target_mode("low", "normal", "extra"), "high",
+                         "extra control should reach the device ceiling one risk tier earlier")
         self.assertEqual(smart.target_mode("low", "high", "high"), "high")
         self.assertEqual(smart.target_mode("low", "extreme", "extra"), "high")
+        self.assertEqual(smart.target_mode("medium", "normal", "extra"), "high")
         self.assertEqual(smart.target_mode("auto", "extreme", "extra"), "auto")
         self.assertEqual(smart.target_mode("off", "extreme", "extra"), "off")
 

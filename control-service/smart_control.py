@@ -806,8 +806,17 @@ def target_mode(baseline: str, tier: str, strength: str) -> str:
     speed_steps = ("low", "medium", "high")
     base_index = speed_steps.index(baseline)
     tier_step = {"weak": 0, "normal": 1, "high": 2, "extreme": 3}[tier]
-    cap = STRENGTHS.get(strength, STRENGTHS["high"])
-    target_index = min(len(speed_steps) - 1, base_index + min(tier_step, cap))
+    strength = strength if strength in STRENGTHS else "high"
+    if strength == "normal":
+        requested_steps = min(tier_step, 1)
+    elif strength == "high":
+        requested_steps = min(tier_step, 2)
+    else:
+        # “Extra” shifts the response one risk band earlier. This makes it
+        # observably stronger than “high” while respecting the physical
+        # low/medium/high ceiling; it never invents a turbo mode.
+        requested_steps = min(len(speed_steps) - 1, tier_step + 1)
+    target_index = min(len(speed_steps) - 1, base_index + requested_steps)
     return speed_steps[target_index]
 
 

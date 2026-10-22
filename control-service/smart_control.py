@@ -145,6 +145,16 @@ def _local_now(config: dict[str, Any], now: datetime | None = None) -> datetime:
     return now.astimezone(zone)
 
 
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime | None = None,
            previous_peak_at: float | None = None,
            official_signal: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -156,6 +166,9 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     official_time = config.get("official_updated_at")
     social_time = config.get("social_updated_at")
     reasons: list[str] = []
+    if weather is not None and not isinstance(weather, dict):
+        weather = None
+        reasons.append("天气数据结构无效，天气信号已忽略")
 
     def fresh_age_seconds(value: Any, limit_s: float) -> float | None:
         try:
@@ -207,46 +220,53 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         reasons.append("尚未录入当地柏科花粉预报；季节和天气不能单独证明空气中花粉浓度")
 
     weather_score = 0.0
-    if weather and weather.get("current"):
+    if weather and isinstance(weather.get("current"), dict):
         current = weather["current"]
-        temp = current.get("temperature_2m")
-        rain = current.get("precipitation", 0) or 0
-        cloud = current.get("cloud_cover", 50) or 0
-        wind = current.get("wind_speed_10m")
-        if isinstance(temp, (int, float)) and 5 <= temp <= 22:
+        temp = _finite_number(current.get("temperature_2m"))
+        rain = _finite_number(current.get("precipitation"))
+        cloud = _finite_number(current.get("cloud_cover"))
+        wind = _finite_number(current.get("wind_speed_10m"))
+        if temp is not None and 5 <= temp <= 22:
             weather_score += 6
             reasons.append(f"气温 {temp:g}°C 处于可能有利的释放温区（仅作弱辅助）")
-        if rain >= 0.2:
+        if rain is not None and rain >= 0.2:
             weather_score -= 12
             reasons.append("当前有降水，短时空气花粉倾向下调")
-        elif cloud < 35:
+        elif rain is not None and cloud is not None and cloud < 35:
             weather_score += 5
             reasons.append("当前少云/晴朗，轻微上调释放与扩散可能性")
-        if isinstance(wind, (int, float)) and 1 <= wind <= 6:
+        if wind is not None and 1 <= wind <= 6:
             weather_score += 2
             reasons.append("轻风条件对花粉扩散只作微弱辅助判断")
         # Rain/sunshine effects are bounded and never replace direct pollen evidence.
         forecast = weather.get("daily", {})
+        forecast = forecast if isinstance(forecast, dict) else {}
         sunny = forecast.get("sunshine_duration_s", [])
         rain_sum = forecast.get("precipitation_sum_mm", [])
+        sunny = sunny if isinstance(sunny, list) else []
+        rain_sum = rain_sum if isinstance(rain_sum, list) else []
         if sunny and rain_sum:
             days = forecast.get("time", [])
+            days = days if isinstance(days, list) else []
             try: today_index = days.index(now_local.date().isoformat())
             except (ValueError, AttributeError): today_index = 0
             today_index = min(today_index, len(sunny) - 1, len(rain_sum) - 1)
-            today_sun = float(sunny[today_index] or 0) / 3600
-            today_rain = float(rain_sum[today_index] or 0)
-            if today_rain > 1: weather_score -= 4
-            elif today_sun >= 8: weather_score += 4
+            today_sun_s = _finite_number(sunny[today_index])
+            today_rain = _finite_number(rain_sum[today_index])
+            today_sun = today_sun_s / 3600 if today_sun_s is not None else None
+            if today_rain is not None and today_rain > 1: weather_score -= 4
+            elif today_rain is not None and today_rain < 1 and today_sun is not None and today_sun >= 8: weather_score += 4
             yesterday = today_index - 1
-            if (yesterday >= 0 and float(rain_sum[yesterday] or 0) > 1 and today_rain < 1
-                    and today_sun >= 6 and isinstance(temp, (int, float)) and 5 <= temp <= 22):
+            yesterday_rain = _finite_number(rain_sum[yesterday]) if yesterday >= 0 else None
+            if (yesterday_rain is not None and yesterday_rain > 1 and today_rain is not None and today_rain < 1
+                    and today_sun is not None and today_sun >= 6 and temp is not None and 5 <= temp <= 22):
                 weather_score += 3
                 reasons.append("前一日降雨后转为温暖晴朗，释放/扩散可能性仅作轻微上调")
             recent_days = range(max(0, today_index - 3), today_index + 1)
-            if (len(list(recent_days)) == 4 and all(
-                    i < len(sunny) and i < len(rain_sum) and float(sunny[i] or 0) / 3600 >= 8
-                    and float(rain_sum[i] or 0) < 1 for i in recent_days)):
+            if (len(list(recent_days)) == 4 and all(i < len(sunny) and i < len(rain_sum)
+                    and (sun_s := _finite_number(sunny[i])) is not None and sun_s / 3600 >= 8
+                    and (rain_i := _finite_number(rain_sum[i])) is not None and rain_i < 1
+                    for i in recent_days)):
                 weather_score -= 3  # weak lagged proxy; future sunshine is not prior pollen depletion
                 reasons.append("过去四天持续晴朗，潜在花粉释放量只作轻微折减，不替代实测预报")
         score += max(-12, min(12, weather_score))
@@ -280,19 +300,23 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         reasons.append("下班回家时段增强已生效（开始时间及持续时间可配置）")
 
     forecast_score = score
-    if weather and weather.get("hourly"):
+    if weather and isinstance(weather.get("hourly"), dict):
         hourly = weather["hourly"]
-        temps = hourly.get("temperature_2m", [])[:6]
-        probs = hourly.get("precipitation_probability", [])[:6]
-        clouds = hourly.get("cloud_cover", [])[:6]
+        temps = hourly.get("temperature_2m", [])
+        probs = hourly.get("precipitation_probability", [])
+        clouds = hourly.get("cloud_cover", [])
+        temps = temps[:6] if isinstance(temps, list) else []
+        probs = probs[:6] if isinstance(probs, list) else []
+        clouds = clouds[:6] if isinstance(clouds, list) else []
         delta = 0
         for index in range(max(len(temps), len(probs), len(clouds))):
-            temp = temps[index] if index < len(temps) else None
-            rain_probability = probs[index] if index < len(probs) else 0
-            cloud = clouds[index] if index < len(clouds) else 50
-            if isinstance(temp, (int, float)) and 5 <= temp <= 22 and (rain_probability or 0) < 30:
-                delta += 1 if isinstance(cloud, (int, float)) and cloud < 45 else 0
-            if (rain_probability or 0) >= 60: delta -= 2
+            temp = _finite_number(temps[index]) if index < len(temps) else None
+            rain_probability = _finite_number(probs[index]) if index < len(probs) else None
+            cloud = _finite_number(clouds[index]) if index < len(clouds) else None
+            if (temp is not None and 5 <= temp <= 22 and rain_probability is not None
+                    and rain_probability < 30 and cloud is not None and cloud < 45):
+                delta += 1
+            if rain_probability is not None and rain_probability >= 60: delta -= 2
         forecast_score = max(0, min(100, score + max(-6, min(6, delta))))
     preboost = False
     peak_at = ((official_signal.get("predicted_peak_at") if official_signal else None)

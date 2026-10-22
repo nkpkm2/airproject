@@ -14,6 +14,7 @@ The controller calculates an explainable 0–100 score:
 
 - Official/local Cupressaceae forecast is primary: configured level 0/1/2/3/4 starts at 0/12/30/52/72 points.
 - Current/forecast rain, temperature, cloud cover and sunshine can change the score by at most 12 points. The weather request retains four past daily observations as well as the near forecast: rain today suppresses the score, warm/sunny weather is a modest increase, a rainy previous day followed by warm sunshine gets only a +3-point contextual adjustment, and four observed sunny/dry days get a −3-point lagged adjustment. Future sunny days are never treated as pollen depletion that has already happened. These are bounded heuristics, not a biological pollen model.
+- Missing, malformed, boolean, or non-finite weather fields are treated as unknown, not as zero rain or clear skies; sunny-weather bonuses require the needed observations to be present.
 - Weather is polled every 15 minutes and is ignored after 60 minutes, or if its fetch timestamp is missing or more than five minutes in the future. A failed refresh may retain the last payload for diagnostics, but the timestamp guard prevents stale weather from affecting the score.
 - Social/allergy chatter adds at most 12 points. It cannot on its own produce a high or extreme decision.
 - Configured annual local season adds 4 monitoring points only. It never claims that pollen was measured.

@@ -389,6 +389,43 @@ class SmartControlTests(unittest.TestCase):
                 self.assertEqual(result["sources"]["weather"], "unavailable_or_stale")
                 self.assertTrue(any("天气数据" in reason for reason in result["reasons"]))
 
+    def test_missing_weather_fields_are_unknown_not_clear_sky(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({})
+        fetched = int(now.timestamp() * 1000)
+        baseline = smart.assess(config, None, now)
+        missing = {"fetched_at_ms": fetched, "current": {"temperature_2m": 15,
+            "precipitation": None, "cloud_cover": None},
+            "daily": {"time": ["2026-04-01"], "sunshine_duration_s": [None],
+                      "precipitation_sum_mm": [None]},
+            "hourly": {"temperature_2m": [15], "precipitation_probability": [None],
+                       "cloud_cover": [None]}}
+        result = smart.assess(config, missing, now)
+        self.assertEqual(result["score"], baseline["score"] + 6)  # temperature alone is known
+        self.assertEqual(result["forecast_score_6h"], result["score"])
+        self.assertFalse(any("晴朗" in reason or "降水" in reason for reason in result["reasons"]))
+
+    def test_malformed_weather_shapes_and_nonfinite_values_do_not_crash_or_boost(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({})
+        fetched = int(now.timestamp() * 1000)
+        baseline = smart.assess(config, None, now)["score"]
+        malformed = [
+            ["not an object"],
+            {"fetched_at_ms": fetched, "current": "not an object", "hourly": [1]},
+            {"fetched_at_ms": fetched, "current": {"temperature_2m": float("nan"),
+                "precipitation": float("inf"), "cloud_cover": True, "wind_speed_10m": float("nan")}},
+            {"fetched_at_ms": fetched, "current": {"temperature_2m": 10 ** 10000}},
+            {"fetched_at_ms": fetched, "current": {}, "daily": "not an object",
+             "hourly": {"temperature_2m": [None], "precipitation_probability": [float("nan")],
+                        "cloud_cover": [0]}},
+        ]
+        for index, weather in enumerate(malformed):
+            with self.subTest(index=index):
+                result = smart.assess(config, weather, now)
+                self.assertEqual(result["score"], baseline)
+                self.assertEqual(result["forecast_score_6h"], baseline)
+
     def test_weather_fetch_requests_and_preserves_four_days_of_daily_history(self):
         class Response:
             def __enter__(self): return self

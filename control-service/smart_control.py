@@ -644,6 +644,25 @@ def desired_tier(risk: dict[str, Any]) -> str:
     return desired
 
 
+def _has_unnegated_phrase(pattern: str, text: str) -> bool:
+    """Match a forecast phrase only when nearby Chinese wording affirms it."""
+    negated_before = re.compile(
+        r"(?:并非|并未|尚未|还未|未能|未曾|未达到|未达|未进入|未出现|未见|未到|"
+        r"没有|不会|不再|不是|不属|未必|非)[^，。；！？!?]{0,12}$"
+    )
+    negated_after = re.compile(
+        r"^[^，。；！？!?]{0,12}(?:尚未|还未|未能|未曾|未达到|未达|未进入|未出现|未见|未到|"
+        r"没有|不会|不再|并未|未必)"
+    )
+    for match in re.finditer(pattern, text, re.I):
+        before = text[max(0, match.start() - 18):match.start()]
+        after = text[match.end():match.end() + 18]
+        if negated_before.search(before) or negated_after.search(after):
+            continue
+        return True
+    return False
+
+
 def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[str, Any]:
     """Extract only fresh, explicit Cupressaceae forecast statements from HTML."""
     if not isinstance(page, str) or len(page) > 500_000:
@@ -670,10 +689,10 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
     if not positions:
         raise ValueError("公告未明确提到柏科/侧柏，避免把杂草花粉误当柏花粉")
     context = " … ".join(text[max(0, index - 300):min(len(text), index + 1_200)] for index in positions[:4])
-    if re.search(r"极高|爆表|非常高|\b(?:4|5)\s*级\b|4\s*(?:到|至|[-~～])\s*5\s*级", context): level = 4
-    elif re.search(r"高峰|高浓度|浓度(?:较)?高|水平较高|高风险|\b3\s*级\b|3\s*(?:到|至|[-~～])\s*4\s*级", context): level = 3
-    elif re.search(r"中等|中度|\b2\s*级\b|适中", context): level = 2
-    elif re.search(r"低浓度|较低|偏低|\b1\s*级\b|低风险", context): level = 1
+    if _has_unnegated_phrase(r"极高|爆表|非常高|\b(?:4|5)\s*级\b|4\s*(?:到|至|[-~～])\s*5\s*级", context): level = 4
+    elif _has_unnegated_phrase(r"高峰|高浓度|浓度(?:较)?高|水平较高|高风险|\b3\s*级\b|3\s*(?:到|至|[-~～])\s*4\s*级", context): level = 3
+    elif _has_unnegated_phrase(r"中等|中度|\b2\s*级\b|适中", context): level = 2
+    elif _has_unnegated_phrase(r"低浓度|较低|偏低|\b1\s*级\b|低风险", context): level = 1
     else: raise ValueError("公告提到柏科但没有可判读的浓度级别/高峰信息")
     peak_at = None
     peak_until = None

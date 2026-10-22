@@ -352,6 +352,16 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(parsed_real_wording["predicted_peak_at"], "2026-03-17T10:00:00+08:00")
         self.assertEqual(parsed_real_wording["predicted_peak_until"], "2026-03-21T23:59:59+08:00")
 
+        # A future peak mentioned in a negative clause is not evidence that
+        # the current official level is high; retain the explicit medium level.
+        not_yet_peak = (
+            "<p>发布日期：2026年4月1日</p>"
+            "<p>侧柏柏科花粉当前浓度中等，4月5日至8日高峰尚未到来。</p>"
+        )
+        parsed_not_yet_peak = smart.parse_official_pollen_page(not_yet_peak, now)
+        self.assertEqual(parsed_not_yet_peak["level"], 2)
+        self.assertEqual(parsed_not_yet_peak["predicted_peak_at"], "2026-04-05T10:00:00+08:00")
+
     def test_official_peak_window_keeps_recent_multiday_forecast_valid_through_its_end(self):
         config = smart.normalize_config({})
         published = datetime(2026, 3, 17, 16, 7, tzinfo=ZoneInfo("Asia/Shanghai"))

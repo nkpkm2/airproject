@@ -486,6 +486,7 @@ def smart_snapshot() -> dict:
     with LOCK:
         config = json.loads(json.dumps(SMART_CONFIG))
         runtime = json.loads(json.dumps(SMART_RUNTIME))
+        effective_tier = runtime.get("effective_tier", "weak")
         visible = []
         now = int(time.time() * 1000)
         for device_id in dict.fromkeys([*DEVICES, *CATALOG["devices"]]):
@@ -497,7 +498,7 @@ def smart_snapshot() -> dict:
             channels = (profile.get("calibration") or {}).get("channels", {})
             calibrated = isinstance(channels, dict) and all(isinstance(channels.get(key), dict) and channels[key].get("quality") == "pass" for key in LAMP_KEYS)
             current = derived.get("mode", "unknown")
-            target = smart_control.target_mode(baseline, runtime.get("effective_tier", "weak"), config["strength"]) if baseline else None
+            target = smart_control.target_mode(baseline, effective_tier, config["strength"]) if baseline else None
             visible.append({
                 "device_id": device_id,
                 "alias": profile.get("alias", device_id),
@@ -515,11 +516,12 @@ def smart_snapshot() -> dict:
             "risk": smart_control.assess(config, runtime.get("weather"), previous_peak_at=runtime.get("last_peak_at") or None,
                                           official_signal=runtime.get("official_pollen") if isinstance(runtime.get("official_pollen"), dict) and runtime["official_pollen"].get("source_url") == config.get("official_url") else None),
             "capacity": smart_control.house_capacity(config),
+            "selected_capacity": smart_control.selected_target_capacity(config, visible, effective_tier),
             "weather": runtime.get("weather"),
             "weather_error": runtime.get("weather_error", ""),
             "official_pollen": runtime.get("official_pollen") if isinstance(runtime.get("official_pollen"), dict) and runtime["official_pollen"].get("source_url") == config.get("official_url") else None,
             "official_pollen_error": runtime.get("official_pollen_error", ""),
-            "effective_tier": runtime.get("effective_tier", "weak"),
+            "effective_tier": effective_tier,
             "devices": visible,
             "updated_at_ms": now,
         }

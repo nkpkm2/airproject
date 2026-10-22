@@ -58,6 +58,7 @@ class SmartControlTests(unittest.TestCase):
                 body = json.loads(response.read().decode("utf-8"))
             self.assertFalse(body["enabled"])
             self.assertEqual(body["capacity"]["volume_m3"], 400)
+            self.assertEqual(body["selected_capacity"]["projected_airflow_m3h"], 0)
             self.assertIn("risk", body)
         finally:
             httpd.shutdown(); httpd.server_close(); worker.join(timeout=2)
@@ -135,6 +136,25 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(selected["baselined_device_count"], 2)
         self.assertEqual(selected["baselined_airflow_m3h"], 20)
         self.assertEqual(selected["auto_baseline_devices_unrated"], 1)
+
+    def test_selected_target_capacity_counts_only_calibrated_devices_and_separates_offline(self):
+        config = smart.normalize_config({"strength": "high", "baselines": {
+            "low-online": "low", "auto-online": "auto", "high-offline": "high", "uncalibrated": "low"}})
+        devices = [
+            {"device_id": "low-online", "baseline_mode": "low", "calibrated": True, "connection_state": "online"},
+            {"device_id": "auto-online", "baseline_mode": "auto", "calibrated": True, "connection_state": "online"},
+            {"device_id": "high-offline", "baseline_mode": "high", "calibrated": True, "connection_state": "offline"},
+            {"device_id": "uncalibrated", "baseline_mode": "low", "calibrated": False, "connection_state": "online"},
+        ]
+        result = smart.selected_target_capacity(config, devices, "high")
+        self.assertEqual(result["configured_device_count"], 4)
+        self.assertEqual(result["calibrated_device_count"], 3)
+        self.assertEqual(result["online_calibrated_device_count"], 2)
+        self.assertEqual(result["projected_airflow_m3h"], 300)
+        self.assertEqual(result["online_airflow_m3h"], 150)
+        self.assertEqual(result["projected_air_changes_per_hour"], 0.75)
+        self.assertEqual(result["online_air_changes_per_hour"], 0.38)
+        self.assertEqual(result["auto_unrated_count"], 1)
 
     def test_official_pollen_page_parser_requires_fresh_cupressaceae_evidence(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))

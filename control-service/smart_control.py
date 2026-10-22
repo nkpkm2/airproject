@@ -396,6 +396,50 @@ def target_mode(baseline: str, tier: str, strength: str) -> str:
     return speed_steps[target_index]
 
 
+def selected_target_capacity(config: dict[str, Any], devices: list[dict[str, Any]], tier: str) -> dict[str, Any]:
+    """Estimate nominal airflow for configured, calibrated devices at this tier.
+
+    This is a planning estimate, not measured CADR. Offline calibrated units are
+    included in the commissioned projection, but excluded from the online subtotal.
+    Auto and off baselines are not assigned an invented airflow value.
+    """
+    rates = config["airflow_m3h"]
+    volume = float(config["area_m2"]) * float(config["ceiling_m"])
+    configured = [device for device in devices if device.get("baseline_mode")]
+    eligible = [device for device in configured if device.get("calibrated")]
+    online = [device for device in eligible if device.get("connection_state") == "online"]
+
+    def estimate(rows: list[dict[str, Any]]) -> tuple[float, int]:
+        total = 0.0
+        unrated_auto = 0
+        for device in rows:
+            baseline = device.get("baseline_mode")
+            mode = target_mode(baseline, tier, config["strength"])
+            if mode in rates:
+                total += float(rates[mode])
+            elif mode == "auto":
+                unrated_auto += 1
+        return round(total, 1), unrated_auto
+
+    planned_flow, planned_auto = estimate(eligible)
+    online_flow, online_auto = estimate(online)
+    return {
+        "configured_device_count": len(configured),
+        "calibrated_device_count": len(eligible),
+        "online_calibrated_device_count": len(online),
+        "tier": tier,
+        "projected_airflow_m3h": planned_flow,
+        "projected_air_changes_per_hour": round(planned_flow / volume, 2),
+        "online_airflow_m3h": online_flow,
+        "online_air_changes_per_hour": round(online_flow / volume, 2),
+        "auto_unrated_count": planned_auto,
+        "online_auto_unrated_count": online_auto,
+        "meets_15x_nominal": planned_flow >= volume * 15,
+        "meets_20x_nominal": planned_flow >= volume * 20,
+        "caveat": "基于已标定设备的目标档位与标称风量估算；不含滤网效率，不能替代 CADR 或实测洁净效果。",
+    }
+
+
 def next_physical_step(current: str, target: str) -> str | None:
     """Return the one physical action to move one verified cycle step closer."""
     if current == target: return None

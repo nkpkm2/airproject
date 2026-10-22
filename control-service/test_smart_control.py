@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Thread
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -21,8 +21,8 @@ class SmartControlTests(unittest.TestCase):
         script = (console / "fleet.js").read_text(encoding="utf-8")
         self.assertIn('id="official-signal-refresh"', page)
         self.assertIn('id="social-signal-refresh"', page)
-        self.assertIn("fleet.css?v=20261022-smart8", page)
-        self.assertIn("fleet.js?v=20261022-smart8", page)
+        self.assertIn("fleet.css?v=20261022-smart9", page)
+        self.assertIn("fleet.js?v=20261022-smart9", page)
         self.assertIn("saveSmart($('smart-enabled').checked,'official')", script)
         self.assertIn("saveSmart($('smart-enabled').checked,'social')", script)
 
@@ -147,6 +147,19 @@ class SmartControlTests(unittest.TestCase):
                         headers={"Content-Type": "application/json"}, method="PUT")
                     social_reviewed = json.loads(urlopen(request, timeout=3).read().decode())
                     self.assertGreater(social_reviewed["config"]["social_updated_at"], now_ms)
+
+                    forecast_start = datetime.now(ZoneInfo("Asia/Shanghai")) + timedelta(days=2)
+                    forecast_end = forecast_start + timedelta(hours=10)
+                    forecast_config = dict(config, official_level=0, official_note="未来预报",
+                        official_forecast_level=4, official_peak_at=forecast_start.isoformat(),
+                        official_forecast_until=forecast_end.isoformat(),
+                        official_forecast_updated_at=now_ms - 8 * 24 * 60 * 60 * 1000,
+                        refresh_official_signal=True)
+                    request = Request(url, data=json.dumps(forecast_config).encode(),
+                        headers={"Content-Type": "application/json"}, method="PUT")
+                    forecast_reviewed = json.loads(urlopen(request, timeout=3).read().decode())
+                    self.assertGreater(forecast_reviewed["config"]["official_forecast_updated_at"], now_ms)
+                    self.assertEqual(forecast_reviewed["risk"]["official_forecast_level"], 4)
 
                     payload.update(official_level=0, refresh_official_signal=True)
                     request = Request(url, data=json.dumps(payload).encode(),
@@ -824,6 +837,46 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(result["tier"], "weak")
         self.assertEqual(result["forecast_tier_6h"], "normal")
         self.assertTrue(result["preboost_active"])
+
+    def test_manual_future_official_peak_is_staged_then_promoted_and_expires_after_window(self):
+        zone = ZoneInfo("Asia/Shanghai")
+        now = datetime(2026, 4, 1, 12, tzinfo=zone)
+        config = smart.normalize_config({
+            "official_forecast_level": 4,
+            "official_forecast_updated_at": int(now.timestamp() * 1000),
+            "official_peak_at": "2026-04-04T08:00",
+            "official_forecast_until": "2026-04-04T18:00",
+            "preboost_minutes": 45,
+            "residual_hours": 30,
+        })
+
+        three_days_early = smart.assess(config, None, now)
+        self.assertEqual(three_days_early["tier"], "weak")
+        self.assertEqual(three_days_early["official_forecast_level"], 4)
+        self.assertEqual(smart.desired_tier(three_days_early), "weak")
+
+        within_lead = smart.assess(config, None, datetime(2026, 4, 4, 7, 30, tzinfo=zone))
+        self.assertTrue(within_lead["preboost_active"])
+        self.assertEqual(within_lead["tier"], "weak")
+        self.assertEqual(smart.desired_tier(within_lead), "normal")
+
+        peak = smart.assess(config, None, datetime(2026, 4, 4, 9, tzinfo=zone))
+        self.assertEqual(peak["tier"], "extreme")
+        self.assertEqual(peak["sources"]["official_pollen"], "operator_forecast_current")
+
+        after_window = smart.assess(config, None, datetime(2026, 4, 5, 7, tzinfo=zone),
+                                    previous_peak_at=datetime(2026, 4, 4, 9, tzinfo=zone).timestamp())
+        self.assertEqual(after_window["official_forecast_level"], 0)
+        self.assertTrue(after_window["residual_active"])
+        self.assertEqual(smart.desired_tier(after_window), "normal")
+
+    def test_manual_future_official_forecast_requires_a_bounded_time_window(self):
+        with self.assertRaisesRegex(ValueError, "开始和结束时间"):
+            smart.normalize_config({"official_forecast_level": 3,
+                                    "official_peak_at": "2026-04-04T08:00"})
+        with self.assertRaisesRegex(ValueError, "不能超过 10 天"):
+            smart.normalize_config({"official_forecast_level": 3,
+                "official_peak_at": "2026-04-01T08:00", "official_forecast_until": "2026-04-12T08:00"})
 
     def test_old_manual_and_social_signals_expire(self):
         now = datetime(2026, 4, 3, 12, tzinfo=ZoneInfo("Asia/Shanghai"))

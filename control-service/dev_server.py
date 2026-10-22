@@ -1131,12 +1131,17 @@ class Handler(BaseHTTPRequestHandler):
                     previous = dict(SMART_CONFIG)
                     now_ms = int(time.time() * 1000)
                     if refresh_official_signal:
-                        if not config["official_level"]:
-                            raise ValueError("请先选择当前有效的官方柏科预报等级")
-                        config["official_updated_at"] = now_ms
+                        if not config["official_level"] and not config["official_forecast_level"]:
+                            raise ValueError("请先填写当前官方等级或未来柏科预报等级")
+                        if config["official_level"]: config["official_updated_at"] = now_ms
+                        if config["official_forecast_level"]: config["official_forecast_updated_at"] = now_ms
                     elif (any(config.get(key) != previous.get(key) for key in ("official_level", "official_note"))
                             or (config["official_level"] and not config.get("official_updated_at"))):
                         config["official_updated_at"] = now_ms
+                    forecast_fields = ("official_forecast_level", "official_peak_at", "official_forecast_until", "official_note")
+                    if (any(config.get(key) != previous.get(key) for key in forecast_fields)
+                            or (config["official_forecast_level"] and not config.get("official_forecast_updated_at"))):
+                        config["official_forecast_updated_at"] = now_ms
                     if refresh_social_signal:
                         if not config["social_level"]:
                             raise ValueError("请先选择当前观察到的社交/过敏趋势等级")

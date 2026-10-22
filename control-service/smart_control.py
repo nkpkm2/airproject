@@ -41,8 +41,10 @@ def default_config() -> dict[str, Any]:
         "timezone": "Asia/Shanghai", "area_m2": 160, "ceiling_m": 2.5,
         "device_count": 23, "airflow_m3h": {"low": 20, "medium": 70, "high": 150},
         "strength": "high", "baselines": {},
-        "official_level": 0, "official_note": "", "official_url": "",
-        "official_updated_at": None, "official_valid_until": None, "official_peak_at": "",
+        "official_level": 0, "official_forecast_level": 0,
+        "official_note": "", "official_url": "",
+        "official_updated_at": None, "official_forecast_updated_at": None,
+        "official_valid_until": None, "official_peak_at": "", "official_forecast_until": "",
         "season_start_md": "", "season_end_md": "",
         "social_level": 0, "social_note": "", "social_updated_at": None,
         "evening_start": "17:10", "evening_minutes": 40,
@@ -104,16 +106,33 @@ def normalize_config(source: object) -> dict[str, Any]:
         key: _config_number(flow.get(key, default), f"{key} 档风量", 0, 2000)
         for key, default in (("low", 20), ("medium", 70), ("high", 150))
     }
-    for key in ("official_level", "social_level"):
+    for key in ("official_level", "official_forecast_level", "social_level"):
         maximum = 4 if key == "official_level" else 3
+        if key == "official_forecast_level": maximum = 4
         label = "官方花粉等级" if key == "official_level" else "社交趋势等级"
+        if key == "official_forecast_level": label = "官方未来预报等级"
         value[key] = _config_number(value.get(key, 0), label, 0, maximum, integer=True)
     value["official_note"] = str(value.get("official_note", "")).strip()[:500]
     value["official_url"] = str(value.get("official_url", "")).strip()[:500]
     value["official_peak_at"] = str(value.get("official_peak_at", "")).strip()[:40]
-    if value["official_peak_at"]:
-        try: datetime.fromisoformat(value["official_peak_at"])
-        except ValueError: raise ValueError("花粉高峰预计时间无效")
+    value["official_forecast_until"] = str(value.get("official_forecast_until", "")).strip()[:40]
+    forecast_start = forecast_end = None
+    for key, label in (("official_peak_at", "花粉预报开始时间"),
+                       ("official_forecast_until", "花粉预报结束时间")):
+        if value[key]:
+            try:
+                parsed = datetime.fromisoformat(value[key])
+            except ValueError:
+                raise ValueError(f"{label}无效")
+            if key == "official_peak_at": forecast_start = parsed
+            else: forecast_end = parsed
+    if value["official_forecast_level"]:
+        if forecast_start is None or forecast_end is None:
+            raise ValueError("填写人工未来预报等级时，必须同时填写高峰开始和结束时间")
+        if forecast_start.tzinfo is None: forecast_start = forecast_start.replace(tzinfo=resolve_timezone(value["timezone"]))
+        if forecast_end.tzinfo is None: forecast_end = forecast_end.replace(tzinfo=resolve_timezone(value["timezone"]))
+        if forecast_end <= forecast_start or forecast_end - forecast_start > timedelta(days=10):
+            raise ValueError("花粉预报结束时间必须晚于开始时间，且窗口不能超过 10 天")
     for key in ("season_start_md", "season_end_md"):
         value[key] = str(value.get(key, "")).strip()[:5]
         if value[key]:
@@ -300,6 +319,47 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         else:
             reason = "官方柏科高峰窗口已结束" if peak_window_expired else "自动读取的官方预报超过控制有效期或时间异常"
             reasons.append(f"{reason}，未参与控制")
+    # A manually verified future bulletin is not a current concentration
+    # reading. Stage it in the forecast lane, then promote it during its
+    # explicit peak window; this mirrors the government-page parser path.
+    manual_forecast = int(config.get("official_forecast_level", 0))
+    if manual_forecast:
+        forecast_age = fresh_age_seconds(config.get("official_forecast_updated_at"), 7 * 24 * 3600)
+        try:
+            manual_start = datetime.fromisoformat(config.get("official_peak_at", ""))
+            manual_end = datetime.fromisoformat(config.get("official_forecast_until", ""))
+            if manual_start.tzinfo is None: manual_start = manual_start.replace(tzinfo=now_local.tzinfo)
+            if manual_end.tzinfo is None: manual_end = manual_end.replace(tzinfo=now_local.tzinfo)
+            manual_start = manual_start.astimezone(now_local.tzinfo)
+            manual_end = manual_end.astimezone(now_local.tzinfo)
+            forecast_window_valid = (manual_end >= manual_start
+                                     and manual_start <= now_local + timedelta(days=7)
+                                     and manual_end >= now_local - timedelta(hours=12))
+        except (TypeError, ValueError, OverflowError):
+            forecast_window_valid = False
+            manual_start = manual_end = None
+        if forecast_age is not None and forecast_window_valid:
+            if now_local < manual_start:
+                if (manual_forecast > official_forecast_level
+                        or official_forecast_peak_at is None):
+                    official_forecast_peak_at = manual_start.isoformat()
+                official_forecast_level = max(official_forecast_level, manual_forecast)
+                if official == 0:
+                    official_source = "operator_forecast"
+                reasons.append(
+                    f"人工核验的柏科预报等级 {manual_forecast}/4 对应未来时段 "
+                    f"{manual_start.isoformat()} 至 {manual_end.isoformat()}；按提前量预升档，不作当前浓度"
+                )
+            elif now_local <= manual_end + timedelta(hours=12):
+                official = max(official, manual_forecast)
+                if official == manual_forecast:
+                    official_source = "operator_forecast_current"
+                reasons.append(
+                    f"人工核验的柏科预报窗口当前生效（等级 {manual_forecast}/4，至 "
+                    f"{manual_end.isoformat()}，含 12 小时室内余效宽限）"
+                )
+        else:
+            reasons.append("人工未来柏科预报已过期、窗口无效或距窗口超过 7 天，未参与控制")
     score = (0.0, 12.0, 30.0, 52.0, 72.0)[official]
     season_start, season_end = config.get("season_start_md", ""), config.get("season_end_md", "")
     in_season = False

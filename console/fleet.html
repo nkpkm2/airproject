@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#000080">
   <title>家庭空气管理</title>
-  <link rel="stylesheet" href="fleet.css?v=20261022-smart8">
+  <link rel="stylesheet" href="fleet.css?v=20261022-smart9">
 </head>
 <body>
   <header class="topbar">
@@ -63,11 +63,13 @@
           <label>高档标称风量 (m³/h)<input id="flow-high" type="number" min="0" max="2000"></label>
         </div><div id="capacity-summary" class="capacity-summary">—</div><p class="smart-note">按风量计算的是名义循环换气次数，不等于颗粒物 CADR 或实际洁净效果；15×/20×只作能力对照，系统不会虚报达标。</p></section>
         <section class="smart-box"><h3>花粉与环境信号</h3><div class="smart-grid">
-          <label>官方柏科花粉预报<select id="official-level"><option value="0">未知 / 未发布</option><option value="1">弱</option><option value="2">正常</option><option value="3">高</option><option value="4">极高</option></select></label>
+          <label>人工核验的当前柏科等级<select id="official-level"><option value="0">未知 / 未发布</option><option value="1">弱</option><option value="2">正常</option><option value="3">高</option><option value="4">极高</option></select></label>
           <label>官方预报来源链接<input id="official-url" type="url" placeholder="当地园林/气象/疾控的 HTTPS 公告"></label>
           <label class="wide">官方预报备注<input id="official-note" maxlength="500" placeholder="预报日期、发布时间、柏科/侧柏等级"></label>
-          <button id="official-signal-refresh" type="button" class="smart-signal-refresh" style="grid-column:1/-1">保存并标记：我已复核官方预报（刷新 48 小时有效期）</button>
-          <label class="wide">官方预测高峰时间<input id="official-peak" type="datetime-local"><small>填写本地预报中的开始/最强时段；设置提前量后会提前预升档</small></label>
+          <label>人工未来预报等级<select id="official-forecast-level"><option value="0">无未来预报</option><option value="1">弱</option><option value="2">正常</option><option value="3">高</option><option value="4">极高</option></select></label>
+          <label>预报高峰开始<input id="official-peak" type="datetime-local"></label>
+          <label>预报高峰结束<input id="official-forecast-until" type="datetime-local"><small>人工未来预报在该时间窗前只按提前量预升一档；进入窗口后才按预报等级计分。</small></label>
+          <button id="official-signal-refresh" type="button" class="smart-signal-refresh" style="grid-column:1/-1">保存并标记：我已复核官方信号（当前等级 48 小时 / 未来预报 7 天）</button>
           <label>柏科季节起始 (MM-DD)<input id="season-start" maxlength="5" placeholder="03-01"></label><label>柏科季节结束 (MM-DD)<input id="season-end" maxlength="5" placeholder="05-15"></label>
           <label>社交/过敏讨论趋势<select id="social-level"><option value="0">无可靠信号</option><option value="1">略有增加</option><option value="2">明显增加</option><option value="3">异常集中</option></select></label>
           <label class="wide">趋势观察备注<input id="social-note" maxlength="500" placeholder="人工核验公开讨论趋势；只作弱信号，不能单独触发极高档"></label><div id="social-signal-status" class="smart-note" style="grid-column:1/-1">社交/过敏趋势未提供</div>
@@ -83,6 +85,6 @@
       <div class="smart-footer"><span id="smart-warning">未配置任何设备基准；策略不会向设备发送命令。</span><button id="smart-save" type="button">保存设置</button><button id="smart-apply" type="button" class="primary">保存并启用</button><button id="smart-pause" type="button">保存并暂停</button></div>
     </form>
   </dialog>
-  <script src="fleet.js?v=20261022-smart8"></script>
+  <script src="fleet.js?v=20261022-smart9"></script>
 </body>
 </html>

@@ -890,7 +890,13 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(three_days_early["official_forecast_level"], 4)
         self.assertEqual(smart.desired_tier(three_days_early), "weak")
 
-        within_lead = smart.assess(config, None, datetime(2026, 4, 4, 7, 30, tzinfo=zone))
+        within_lead_now = datetime(2026, 4, 4, 7, 30, tzinfo=zone)
+        auto_peak_at = datetime(2026, 4, 6, 8, tzinfo=zone)
+        auto_signal = {"level": 1, "fetched_at_ms": int(within_lead_now.timestamp() * 1000),
+            "published_at_ms": int(within_lead_now.timestamp() * 1000),
+            "predicted_peak_at": auto_peak_at.isoformat(),
+            "predicted_peak_until": (auto_peak_at + timedelta(hours=24)).isoformat()}
+        within_lead = smart.assess(config, None, within_lead_now, official_signal=auto_signal)
         self.assertTrue(within_lead["preboost_active"])
         self.assertEqual(within_lead["tier"], "weak")
         self.assertEqual(smart.desired_tier(within_lead), "normal")

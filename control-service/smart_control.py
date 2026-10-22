@@ -538,8 +538,7 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
                 f"预测评分净上调 {forecast_weather_adjustment:g} 分（上限 +6；天气不会下调当前花粉等级）"
             )
     preboost = False
-    peak_at = ((official_signal.get("predicted_peak_at") if official_signal else None)
-               if official_signal_valid else None) or config.get("official_peak_at")
+    peak_at = official_forecast_peak_at or config.get("official_peak_at")
     if peak_at:
         try:
             forecast_peak = datetime.fromisoformat(peak_at)

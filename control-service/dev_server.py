@@ -1122,14 +1122,27 @@ class Handler(BaseHTTPRequestHandler):
         if urlparse(self.path).path == "/api/v1/smart-control":
             try:
                 body = self.read_json()
+                refresh_official_signal = body.pop("refresh_official_signal", False)
+                refresh_social_signal = body.pop("refresh_social_signal", False)
+                if not isinstance(refresh_official_signal, bool) or not isinstance(refresh_social_signal, bool):
+                    raise ValueError("信号复核标记必须为布尔值")
                 config = smart_control.normalize_config(body)
                 with LOCK:
                     previous = dict(SMART_CONFIG)
-                    if (any(config.get(key) != previous.get(key) for key in ("official_level", "official_note"))
+                    now_ms = int(time.time() * 1000)
+                    if refresh_official_signal:
+                        if not config["official_level"]:
+                            raise ValueError("请先选择当前有效的官方柏科预报等级")
+                        config["official_updated_at"] = now_ms
+                    elif (any(config.get(key) != previous.get(key) for key in ("official_level", "official_note"))
                             or (config["official_level"] and not config.get("official_updated_at"))):
-                        config["official_updated_at"] = int(time.time() * 1000)
-                    if any(config.get(key) != previous.get(key) for key in ("social_level", "social_note")) or (config["social_level"] and not config.get("social_updated_at")):
-                        config["social_updated_at"] = int(time.time() * 1000)
+                        config["official_updated_at"] = now_ms
+                    if refresh_social_signal:
+                        if not config["social_level"]:
+                            raise ValueError("请先选择当前观察到的社交/过敏趋势等级")
+                        config["social_updated_at"] = now_ms
+                    elif any(config.get(key) != previous.get(key) for key in ("social_level", "social_note")) or (config["social_level"] and not config.get("social_updated_at")):
+                        config["social_updated_at"] = now_ms
                     if config["enabled"]:
                         calibrated = False
                         for device_id in config["baselines"]:

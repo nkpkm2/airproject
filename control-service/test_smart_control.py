@@ -101,6 +101,50 @@ class SmartControlTests(unittest.TestCase):
         finally:
             httpd.shutdown(); httpd.server_close(); worker.join(timeout=2)
 
+    def test_manual_signal_expiry_refresh_requires_explicit_review(self):
+        with tempfile.TemporaryDirectory() as folder:
+            now_ms = int(time.time() * 1000)
+            config = smart.normalize_config({"official_level": 2, "official_note": "今日园林公告",
+                "official_updated_at": now_ms - 49 * 60 * 60 * 1000,
+                "social_level": 1, "social_note": "公开讨论增多",
+                "social_updated_at": now_ms - 13 * 60 * 60 * 1000})
+            runtime = {"weather": None, "weather_fetched_at": 0, "last_peak_at": 0,
+                "effective_tier": "weak", "candidate_tier": "weak", "candidate_since": 0,
+                "device_actions": {}, "last_error": ""}
+            with patch.object(server, "SMART_PATH", Path(folder) / "settings.json"), \
+                    patch.object(server, "SMART_CONFIG", config), patch.object(server, "SMART_RUNTIME", runtime), \
+                    patch.object(server, "CATALOG", {"devices": {}}), patch.object(server, "DEVICES", {}):
+                httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+                worker = Thread(target=httpd.serve_forever, daemon=True); worker.start()
+                url = f"http://127.0.0.1:{httpd.server_address[1]}/api/v1/smart-control"
+                try:
+                    saved = json.loads(urlopen(url, timeout=3).read().decode())
+                    self.assertEqual(saved["risk"]["sources"]["official_pollen"], "operator_entry")
+                    self.assertTrue(any("超过 48 小时" in reason for reason in saved["risk"]["reasons"]))
+
+                    time.sleep(0.01)
+                    payload = dict(config, refresh_official_signal=True)
+                    request = Request(url, data=json.dumps(payload).encode(),
+                        headers={"Content-Type": "application/json"}, method="PUT")
+                    reviewed = json.loads(urlopen(request, timeout=3).read().decode())
+                    self.assertGreater(reviewed["config"]["official_updated_at"], now_ms)
+                    self.assertNotIn("refresh_official_signal", reviewed["config"])
+                    self.assertEqual(reviewed["risk"]["sources"]["official_pollen"], "operator_entry")
+
+                    payload = dict(config, refresh_social_signal=True)
+                    request = Request(url, data=json.dumps(payload).encode(),
+                        headers={"Content-Type": "application/json"}, method="PUT")
+                    social_reviewed = json.loads(urlopen(request, timeout=3).read().decode())
+                    self.assertGreater(social_reviewed["config"]["social_updated_at"], now_ms)
+
+                    payload.update(official_level=0, refresh_official_signal=True)
+                    request = Request(url, data=json.dumps(payload).encode(),
+                        headers={"Content-Type": "application/json"}, method="PUT")
+                    with self.assertRaises(HTTPError) as raised: urlopen(request, timeout=3)
+                    self.assertEqual(raised.exception.code, 400)
+                finally:
+                    httpd.shutdown(); httpd.server_close(); worker.join(timeout=2)
+
     def test_smart_control_settings_are_persisted_but_unverified_devices_cannot_be_enabled(self):
         with tempfile.TemporaryDirectory() as folder:
             config = smart.default_config()

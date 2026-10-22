@@ -29,13 +29,46 @@ class SmartControlTests(unittest.TestCase):
     def test_restart_recovery_drops_unpublished_queue_and_marks_inflight_pulse_uncertain(self):
         runtime = {"device_actions": {"pur-test": {
             "queue_command": "opto.mode.pulse", "queue_origin": "smart_control",
+            "queue_expected": "medium", "queue_created_at_ms": 1234,
             "inflight": {"expected": "medium", "sent_at_ms": 1234, "request_id": "req-1"}}}}
         server.recover_smart_runtime_after_restart(runtime)
         action = runtime["device_actions"]["pur-test"]
         self.assertNotIn("queue_command", action)
         self.assertNotIn("queue_origin", action)
+        self.assertNotIn("queue_expected", action)
+        self.assertNotIn("queue_created_at_ms", action)
         self.assertTrue(action["inflight"]["restart_recovery"])
         self.assertIn("重启后", action["status"])
+
+    def test_23_device_control_dispatch_is_batched_fairly_without_early_timeout_timers(self):
+        action_map = {f"pur-{index:02d}": {} for index in range(23)}
+        waiting = [{"device_id": device_id, "command": "opto.mode.pulse", "expected": "medium",
+                    "target": "high", "origin": "smart_control", "last_sent_at_ms": 0}
+                   for device_id in action_map]
+        dispatched = []
+        for batch_number in range(5):
+            batch = server.stage_smart_command_batch(action_map, waiting, 1_000 + batch_number * 5_000)
+            self.assertLessEqual(len(batch), server.MAX_SMART_COMMANDS_PER_TICK)
+            self.assertEqual(len({device_id for device_id, _, _ in batch}), len(batch))
+            batch_ids = {device_id for device_id, _, _ in batch}
+            dispatched.extend(batch_ids)
+            for device_id in batch_ids:
+                self.assertEqual(action_map[device_id]["inflight"]["sent_at_ms"], 1_000 + batch_number * 5_000)
+            unselected = set(action_map) - set(dispatched)
+            for device_id in unselected:
+                self.assertNotIn("inflight", action_map[device_id],
+                                 "unpublished devices must not start the 12-second confirmation timer")
+            waiting = [candidate for candidate in waiting if candidate["device_id"] not in batch_ids]
+        self.assertEqual(set(dispatched), set(action_map))
+        self.assertEqual(len(dispatched), 23)
+
+    def test_manual_device_targets_precede_smart_commands_in_bounded_dispatch(self):
+        candidates = [{"device_id": f"auto-{index}", "origin": "smart_control",
+                       "last_sent_at_ms": 0} for index in range(8)]
+        candidates.append({"device_id": "manual", "origin": "manual_target", "last_sent_at_ms": 99_000})
+        selected = server.select_smart_command_batch(candidates)
+        self.assertEqual(len(selected), server.MAX_SMART_COMMANDS_PER_TICK)
+        self.assertIn("manual", {item["device_id"] for item in selected})
 
     def test_restart_discards_unavailable_weather_and_restarts_downshift_observation_dwell(self):
         runtime = {"weather": None, "weather_fetched_at": 1_000_000,
@@ -89,6 +122,7 @@ class SmartControlTests(unittest.TestCase):
         runtime = {"weather": {"current": {"temperature_2m": 15}},
                    "device_actions": {"pur-test": {
                        "queue_command": "opto.mode.pulse", "queue_origin": "smart_control",
+                       "queue_expected": "medium", "queue_created_at_ms": 1234,
                        "inflight": {"expected": "medium", "sent_at_ms": 1234}}}}
         with tempfile.TemporaryDirectory() as folder, patch.object(server, "SMART_RUNTIME", runtime), \
                 patch.object(server, "SMART_RUNTIME_PATH", Path(folder) / "runtime.json"):
@@ -96,6 +130,7 @@ class SmartControlTests(unittest.TestCase):
             saved = json.loads((Path(folder) / "runtime.json").read_text(encoding="utf-8"))
         self.assertNotIn("weather", saved)
         self.assertNotIn("queue_command", saved["device_actions"]["pur-test"])
+        self.assertNotIn("queue_expected", saved["device_actions"]["pur-test"])
         self.assertIn("inflight", saved["device_actions"]["pur-test"])
 
     def test_smart_control_status_endpoint(self):

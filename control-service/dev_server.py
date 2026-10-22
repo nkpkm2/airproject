@@ -23,6 +23,7 @@ DEGRADED_GRACE_MS = 5_000
 EXPLICIT_OFFLINE_GRACE_MS = 5_000
 MAX_PENDING_COMMANDS = 3
 MAX_COMMAND_HISTORY = 50
+MAX_SMART_COMMANDS_PER_TICK = 5
 RUNTIME_ID = uuid4().hex
 CATALOG_PATH = ROOT / "data" / "device_catalog.json"
 SMART_PATH = ROOT / "data" / "smart-control.json"
@@ -56,7 +57,7 @@ def save_smart_runtime() -> None:
     if isinstance(safe.get("device_actions"), dict):
         safe["device_actions"] = {
             device_id: {key: value for key, value in action.items()
-                        if key not in {"queue_command", "queue_origin"}}
+                        if key not in {"queue_command", "queue_origin", "queue_expected", "queue_created_at_ms"}}
             for device_id, action in safe["device_actions"].items() if isinstance(action, dict)
         }
     temporary.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -100,8 +101,8 @@ def recover_smart_runtime_after_restart(runtime: dict) -> None:
     if not isinstance(actions, dict): return
     for action in actions.values():
         if not isinstance(action, dict): continue
-        action.pop("queue_command", None)
-        action.pop("queue_origin", None)
+        for key in ("queue_command", "queue_origin", "queue_expected", "queue_created_at_ms"):
+            action.pop(key, None)
         inflight = action.get("inflight")
         if isinstance(inflight, dict):
             inflight["restart_recovery"] = True
@@ -138,6 +139,31 @@ def observe_external_mode_change(action_state: dict, current_mode: str, now_ms: 
         int(action_state.get("manual_override_until_ms", 0)), now_ms + 30 * 60 * 1000),
         status="检测到实体按键或其他控制改档，自动调控让出 30 分钟")
     return True
+
+def select_smart_command_batch(candidates: list[dict]) -> list[dict]:
+    """Fairly bound one controller tick; manual targets go ahead of automation."""
+    return sorted(candidates, key=lambda item: (
+        0 if item.get("origin") == "manual_target" else 1,
+        int(item.get("last_sent_at_ms", 0)), str(item.get("device_id", "")),
+    ))[:MAX_SMART_COMMANDS_PER_TICK]
+
+def stage_smart_command_batch(action_map: dict, candidates: list[dict], now_ms: int) -> list[tuple[str, str, str]]:
+    """Start ACK/lamp-confirmation timers only for commands actually dispatched."""
+    selected = select_smart_command_batch(candidates)
+    selected_ids = {item["device_id"] for item in selected}
+    for item in candidates:
+        device_id = item["device_id"]
+        action = action_map.setdefault(device_id, {})
+        if device_id not in selected_ids:
+            action.update(status="等待控制队列分批发送", target_mode=item["target"])
+    queued = []
+    for item in selected:
+        device_id, command, origin = item["device_id"], item["command"], item["origin"]
+        action = action_map.setdefault(device_id, {})
+        action.update(status="正在调节", target_mode=item["target"], last_sent_at_ms=now_ms,
+                      inflight={"expected": item["expected"], "sent_at_ms": now_ms, "command": command})
+        queued.append((device_id, command, origin))
+    return queued
 
 def canonical_device_id(value: object) -> str:
     """Use one immutable identity for both raw-MAC serial and MQTT IDs."""
@@ -683,6 +709,7 @@ def smart_controller_loop() -> None:
             action_map = SMART_RUNTIME.setdefault("device_actions", {})
             control_ids = set(action_map)
             if config.get("enabled"): control_ids.update(config.get("baselines", {}))
+            planned_commands = []
             for device_id in control_ids:
                     record = DEVICES.get(device_id)
                     profile = CATALOG["devices"].get(device_id, {})
@@ -768,18 +795,12 @@ def smart_controller_loop() -> None:
                         expected = "off" if current_mode != "off" else "active"
                     else:
                         expected = smart_control.MODES[(smart_control.MODES.index(current_mode) + 1) % len(smart_control.MODES)]
-                    action_state.update(status="正在调节", target_mode=target, last_sent_at_ms=now_ms,
-                                        inflight={"expected": expected, "sent_at_ms": now_ms, "command": command})
-                    # Queue outside the service lock below; remember one action
-                    # per iteration to keep MQTT and device keys from contending.
-                    action_state["queue_command"] = command
-                    action_state["queue_origin"] = "manual_target" if manual_target else "smart_control"
-            queued = [(device_id, action.get("queue_command"), action.get("queue_origin", "smart_control"))
-                      for device_id, action in SMART_RUNTIME.get("device_actions", {}).items() if action.get("queue_command")][:5]
-            for device_id, _, _ in queued:
-                action = SMART_RUNTIME["device_actions"][device_id]
-                action.pop("queue_command", None)
-                action.pop("queue_origin", None)
+                    planned_commands.append({
+                        "device_id": device_id, "command": command, "expected": expected,
+                        "target": target, "origin": "manual_target" if manual_target else "smart_control",
+                        "last_sent_at_ms": int(action_state.get("last_sent_at_ms", 0)),
+                    })
+            queued = stage_smart_command_batch(action_map, planned_commands, now_ms)
             if queued or now_s - last_save >= 30:
                 save_smart_runtime()
                 last_save = now_s

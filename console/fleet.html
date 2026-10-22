@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#000080">
   <title>家庭空气管理</title>
-  <link rel="stylesheet" href="fleet.css?v=20261022-smart12">
+  <link rel="stylesheet" href="fleet.css?v=20261022-smart14">
 </head>
 <body>
   <header class="topbar">
@@ -77,14 +77,15 @@
           <label>下班增强开始<select id="evening-start"><option>17:10</option><option>17:00</option><option>17:30</option><option>18:00</option></select></label>
           <label>持续分钟<input id="evening-minutes" type="number" min="0" max="240"></label>
           <label>预报提前量 (分钟)<input id="preboost-minutes" type="number" min="0" max="360"></label>
-          <label>峰后室内余效 (小时)<input id="residual-hours" type="number" min="0" max="72"></label>
-        </div><p class="smart-note">填入当地园林/气象/疾控公告后，系统每小时尝试读取一次：仅接受 HTTPS 的政府域名页面，要求正文明确出现柏科/侧柏及新近发布日期；无法可靠判级时不会自动采用。天气温度、降雨、日照和轻风只作有限辅助；社交信号有噪声且权重封顶，暂需人工核验。天气由 <a href="https://open-meteo.com/en/docs" target="_blank" rel="noreferrer">Open-Meteo</a> 提供并注明来源。其全球花粉 API 当前不含中国柏科花粉浓度，故不会用天气冒充柏花粉实测值。<a href="https://index.baidu.com/Helper" target="_blank" rel="noreferrer">百度指数官方说明</a>暂不提供开放 API；社交平台数据需走授权能力。</p><div id="official-pollen-status" class="smart-note">官方预报尚未配置</div></section>
+          <label>峰后室内余效 (小时)<input id="residual-hours" type="number" min="0" max="72"><small>默认 18 小时是控制策略的渐退时间，不是室内花粉清除时间；可按家庭情况设为 0–72 小时。过敏原沉降残留不等于仍有同等空气浓度。</small></label>
+          <label class="wide"><span><input id="rain-suppression" type="checkbox" checked> 启用降雨影响</span><small>关闭后忽略当前/预报降雨抑制及雨后晴天加分；温度、云量等独立天气信号仍保留。</small></label>
+        </div><p class="smart-note">填入当地园林/气象/疾控公告后，系统每小时尝试读取一次：仅接受 HTTPS 的政府域名页面，要求正文明确出现柏科/侧柏及新近发布日期；无法可靠判级时不会自动采用。天气温度、降雨、日照和轻风只作有限辅助；社交信号有噪声且权重封顶，暂需人工核验。天气由 <a href="https://open-meteo.com/en/docs" target="_blank" rel="noreferrer">Open-Meteo</a> 提供并注明来源。其全球花粉 API 当前不含中国柏科花粉浓度，故不会用天气冒充柏花粉实测值。<a href="https://index.baidu.com/Helper" target="_blank" rel="noreferrer">百度指数帮助</a>称大众版暂不支持数据下载、暂无开放 API；<a href="https://index.baidu.com/v2/index.html?lang=zh" target="_blank" rel="noreferrer">百度指数首页</a>另展示 API 加词/数据接口化服务，具体权限与费用须登录核实，本工具目前不自动调用。微博/小红书数据须走平台授权能力。</p><div id="official-pollen-status" class="smart-note">官方预报尚未配置</div></section>
       </div>
       <section class="smart-box smart-device-box"><div class="smart-device-head"><h3>设备基准档位</h3><span>花粉弱时恢复此档；关机基准不会被自动开机</span></div><div id="smart-devices" class="smart-device-list"></div></section>
       <div id="smart-explanation" class="smart-explanation">—</div>
       <div class="smart-footer"><span id="smart-warning">未配置任何设备基准；策略不会向设备发送命令。</span><button id="smart-save" type="button">保存设置</button><button id="smart-apply" type="button" class="primary">保存并启用</button><button id="smart-pause" type="button">保存并暂停</button></div>
     </form>
   </dialog>
-  <script src="fleet.js?v=20261022-smart12"></script>
+  <script src="fleet.js?v=20261022-smart14"></script>
 </body>
 </html>

@@ -81,6 +81,8 @@ def normalize_config(source: object) -> dict[str, Any]:
     value["schema"] = "air-smart-control-v1"
     if not isinstance(value.get("enabled"), bool):
         raise ValueError("enabled 必须是布尔值")
+    if not isinstance(value.get("rain_suppression"), bool):
+        raise ValueError("rain_suppression 必须是布尔值")
     value["location_name"] = str(value.get("location_name", "")).strip()[:80]
     for key, low, high in (("latitude", -90, 90), ("longitude", -180, 180)):
         raw = value.get(key)
@@ -427,7 +429,7 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         if rain_rate is not None and not math.isfinite(rain_rate):
             rain_rate = None
         rain_penalty = 0.0
-        if rain_rate is not None:
+        if config["rain_suppression"] and rain_rate is not None:
             if rain_rate <= 0.2: rain_penalty = 0
             elif rain_rate < 1: rain_penalty = -2 * (rain_rate - 0.2) / 0.8
             elif rain_rate < 3: rain_penalty = -2 - 4 * (rain_rate - 1) / 2
@@ -437,7 +439,8 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             if rain_penalty < 0:
                 reasons.append(f"近 {rain_interval_s / 60:g} 分钟降水 {rain:g} mm（折算雨强 {rain_rate:g} mm/h），连续雨强辅助约 {rain_penalty:.1f} 分")
         cloud_points = 0.0
-        if rain_rate is not None and rain_rate < 0.2 and cloud is not None and cloud < 35:
+        if (cloud is not None and cloud < 35
+                and (not config["rain_suppression"] or (rain_rate is not None and rain_rate < 0.2))):
             cloud_points = 5 * max(0.0, min(1.0, (35 - cloud) / 25))
             weather_score += cloud_points
             if cloud_points > 0:
@@ -459,7 +462,8 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             today_sun = today_sun_s / 3600 if today_sun_s is not None else None
             yesterday = today_index - 1
             yesterday_rain = _bounded_weather_number(rain_sum[yesterday], 0, 10_000) if yesterday >= 0 else None
-            if (yesterday_rain is not None and yesterday_rain > 1 and rain_rate is not None and rain_rate < 0.2
+            if (config["rain_suppression"] and yesterday_rain is not None and yesterday_rain > 1
+                    and rain_rate is not None and rain_rate < 0.2
                     and today_sun is not None and today_sun >= 6 and temp_points > 0):
                 weather_score += 3
                 reasons.append("前一日降雨后转为温暖晴朗，释放/扩散可能性仅作轻微上调")
@@ -552,13 +556,16 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
                 elif 10 <= temp <= 18: warm_factor = 1.0
                 elif 18 < temp < 22: warm_factor = (22 - temp) / 4
             clear_factor = max(0.0, min(1.0, (60 - cloud) / 40)) if cloud is not None else None
-            dry_forecast_factor = max(0.0, min(1.0, (70 - rain_probability) / 60)) if rain_probability is not None else None
+            dry_forecast_factor = (max(0.0, min(1.0, (70 - rain_probability) / 60))
+                                   if config["rain_suppression"] and rain_probability is not None
+                                   else 1.0 if not config["rain_suppression"] else None)
             if warm_factor > 0 and clear_factor is not None and dry_forecast_factor is not None:
                 contribution = warm_factor * clear_factor * dry_forecast_factor
                 delta += contribution
                 forecast_components["warm_clear_contribution"] += contribution
-            if (temp is not None and 5 <= temp <= 22 and rain_probability is not None
-                    and rain_probability < 30 and cloud is not None and cloud < 45):
+            if (temp is not None and 5 <= temp <= 22 and cloud is not None and cloud < 45
+                    and (not config["rain_suppression"]
+                         or (rain_probability is not None and rain_probability < 30))):
                 forecast_components["warm_clear_hours"] += 1
             if humidity is not None and humidity < 40:
                 forecast_components["low_humidity_hours"] += 1
@@ -566,11 +573,11 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
                 contribution = 0.25 * max(0.0, min(1.0, (50 - humidity) / 20))
                 delta += contribution
                 forecast_components["low_humidity_contribution"] += contribution
-            if rain_probability is not None:
+            if config["rain_suppression"] and rain_probability is not None:
                 suppression = 1.5 * max(0.0, min(1.0, (rain_probability - 20) / 60))
                 delta -= suppression
                 forecast_components["rain_suppression_contribution"] += suppression
-            if rain_probability is not None and rain_probability >= 60:
+            if config["rain_suppression"] and rain_probability is not None and rain_probability >= 60:
                 forecast_components["high_precipitation_probability_hours"] += 1
         forecast_hours_used = len(forecast_indices)
         forecast_score = max(score, max(0, min(100, score + max(-6, min(6, delta)))))

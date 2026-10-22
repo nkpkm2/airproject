@@ -21,8 +21,11 @@ class SmartControlTests(unittest.TestCase):
         script = (console / "fleet.js").read_text(encoding="utf-8")
         self.assertIn('id="official-signal-refresh"', page)
         self.assertIn('id="social-signal-refresh"', page)
-        self.assertIn("fleet.css?v=20261022-smart12", page)
-        self.assertIn("fleet.js?v=20261022-smart12", page)
+        self.assertIn('id="rain-suppression"', page)
+        self.assertIn("fleet.css?v=20261022-smart14", page)
+        self.assertIn("fleet.js?v=20261022-smart14", page)
+        self.assertIn("不是室内花粉清除时间", page)
+        self.assertIn("rain_suppression:$('rain-suppression').checked", script)
         self.assertIn("saveSmart($('smart-enabled').checked,'official')", script)
         self.assertIn("saveSmart($('smart-enabled').checked,'social')", script)
 
@@ -578,16 +581,23 @@ class SmartControlTests(unittest.TestCase):
 
     def test_indoor_residual_tail_holds_normal_target_for_configured_duration(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
-        config = smart.normalize_config({"residual_hours": 18})
-        for age_hours in (0.25, 2, 9, 17.99):
-            with self.subTest(age_hours=age_hours):
-                peak_at = now.timestamp() - age_hours * 3600
-                risk = smart.assess(config, None, now, previous_peak_at=peak_at)
-                self.assertTrue(risk["residual_active"])
-                self.assertEqual(smart.desired_tier(risk), "normal")
-        expired = smart.assess(config, None, now, previous_peak_at=now.timestamp() - 18 * 3600)
-        self.assertFalse(expired["residual_active"])
-        self.assertEqual(smart.desired_tier(expired), "weak")
+        for duration in (0, 1, 18, 48, 72):
+            config = smart.normalize_config({"residual_hours": duration})
+            if duration == 0:
+                zero_tail = smart.assess(config, None, now, previous_peak_at=now.timestamp())
+                self.assertFalse(zero_tail["residual_active"])
+                self.assertEqual(smart.desired_tier(zero_tail), "weak")
+                continue
+            for age_hours in ((duration * 0.5, duration - 0.01) if duration else (0,)):
+                with self.subTest(duration=duration, age_hours=age_hours):
+                    peak_at = now.timestamp() - age_hours * 3600
+                    risk = smart.assess(config, None, now, previous_peak_at=peak_at)
+                    self.assertTrue(risk["residual_active"])
+                    self.assertEqual(smart.desired_tier(risk), "normal")
+            expired = smart.assess(config, None, now,
+                                   previous_peak_at=now.timestamp() - duration * 3600)
+            self.assertFalse(expired["residual_active"])
+            self.assertEqual(smart.desired_tier(expired), "weak")
 
     def test_desired_tier_combines_forecast_preboost_and_residual_floor(self):
         self.assertEqual(smart.desired_tier({"tier": "weak", "forecast_tier_6h": "high"}), "high")
@@ -629,6 +639,7 @@ class SmartControlTests(unittest.TestCase):
             {"airflow_m3h": {"low": float("nan"), "medium": 70, "high": 150}},
             {"official_level": 2.5},
             {"social_level": True},
+            {"rain_suppression": "false"},
             {"strength": "unknown"},
             {"season_start_md": "03-01"},
             {"baselines": {"pur-test": "turbo"}},
@@ -703,6 +714,36 @@ class SmartControlTests(unittest.TestCase):
         missing_interval = {"fetched_at_ms": fetched_at_ms, "current": {
             "temperature_2m": 15, "precipitation": 5, "cloud_cover": 80}}
         self.assertEqual(smart.assess(config, missing_interval, now)["score"], dry["score"])
+
+    def test_disabling_rain_suppression_disables_all_rain_derived_score_changes(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        fetched = int(now.timestamp() * 1000)
+        config = smart.normalize_config({"official_level": 2, "official_updated_at": fetched,
+                                         "season_start_md": "03-01", "season_end_md": "05-01",
+                                         "rain_suppression": False})
+        current = lambda precipitation: {"temperature_2m": 15, "precipitation": precipitation,
+                                          "interval": 900, "cloud_cover": 80}
+        dry = {"fetched_at_ms": fetched, "current": current(0)}
+        wet = {"fetched_at_ms": fetched, "current": current(2)}
+        self.assertEqual(smart.assess(config, dry, now)["score"], smart.assess(config, wet, now)["score"])
+
+        times = ["2026-03-31", "2026-04-01"]
+        rain_then_sun = {"fetched_at_ms": fetched, "current": current(0), "daily": {
+            "time": times, "sunshine_duration_s": [0, 25200], "precipitation_sum_mm": [12, 0]}}
+        clear_only = {"fetched_at_ms": fetched, "current": current(0), "daily": {
+            "time": times, "sunshine_duration_s": [0, 25200], "precipitation_sum_mm": [0, 0]}}
+        self.assertEqual(smart.assess(config, rain_then_sun, now)["score"],
+                         smart.assess(config, clear_only, now)["score"])
+
+        def forecast(probability):
+            return {"fetched_at_ms": fetched, "timezone": "Asia/Shanghai", "current": current(0),
+                    "hourly": {"time": ["2026-04-01T12:00"], "temperature_2m": [15],
+                               "relative_humidity_2m": [55], "precipitation_probability": [probability],
+                               "cloud_cover": [10]}}
+        dry_forecast = smart.assess(config, forecast(0), now)
+        wet_forecast = smart.assess(config, forecast(100), now)
+        self.assertEqual(dry_forecast["forecast_score_6h"], wet_forecast["forecast_score_6h"])
+        self.assertEqual(wet_forecast["forecast_components"]["rain_suppression_contribution"], 0)
 
     def test_weather_assistance_is_continuous_near_temperature_and_rain_knots(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -1120,6 +1161,27 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(smart.target_mode("medium", "normal", "extra"), "high")
         self.assertEqual(smart.target_mode("auto", "extreme", "extra"), "auto")
         self.assertEqual(smart.target_mode("off", "extreme", "extra"), "off")
+
+    def test_target_policy_is_monotone_in_risk_and_control_strength(self):
+        ranks = {"low": 0, "medium": 1, "high": 2}
+        tiers = ("weak", "normal", "high", "extreme")
+        strengths = ("normal", "high", "extra")
+        for baseline in ranks:
+            for tier_index, tier in enumerate(tiers):
+                values = [smart.target_mode(baseline, tier, strength) for strength in strengths]
+                with self.subTest(baseline=baseline, tier=tier):
+                    self.assertEqual(values, sorted(values, key=ranks.__getitem__))
+                    self.assertGreaterEqual(ranks[values[0]], ranks[baseline])
+                if tier_index:
+                    previous = [smart.target_mode(baseline, tiers[tier_index - 1], strength)
+                                for strength in strengths]
+                    with self.subTest(baseline=baseline, previous_tier=tiers[tier_index - 1], tier=tier):
+                        self.assertTrue(all(ranks[now] >= ranks[before]
+                                            for before, now in zip(previous, values)))
+        for protected_baseline in ("off", "auto"):
+            with self.subTest(protected_baseline=protected_baseline):
+                self.assertTrue(all(smart.target_mode(protected_baseline, tier, strength) == protected_baseline
+                                    for tier in tiers for strength in strengths))
 
     def test_actuation_is_one_physical_press_at_a_time(self):
         self.assertEqual(smart.next_physical_step("off", "high"), "opto.power.pulse")

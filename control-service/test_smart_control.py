@@ -420,6 +420,44 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(result["forecast_score_6h"], result["score"])
         self.assertFalse(any("晴朗" in reason or "降水" in reason for reason in result["reasons"]))
 
+    def test_six_hour_weather_outlook_uses_future_local_hours_not_midnight_prefix(self):
+        now = datetime(2026, 4, 1, 14, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+        fetched = int(now.timestamp() * 1000)
+        config = smart.normalize_config({"official_level": 2, "official_updated_at": fetched})
+        times = [f"2026-04-01T{hour:02d}:00" for hour in range(24)]
+        # Past hours are rainy; the next six hours are warm, dry and clear.
+        # The old [:6] implementation saw only these past rainy hours.
+        weather = {
+            "fetched_at_ms": fetched,
+            "timezone": "Asia/Shanghai",
+            "current": {"temperature_2m": None, "precipitation": None,
+                        "cloud_cover": None, "wind_speed_10m": None},
+            "hourly": {
+                "time": times,
+                "temperature_2m": [15] * 24,
+                "precipitation_probability": [100] * 24,
+                "cloud_cover": [90] * 24,
+            },
+        }
+        for hour in range(15, 21):
+            weather["hourly"]["precipitation_probability"][hour] = 0
+            weather["hourly"]["cloud_cover"][hour] = 10
+        risk = smart.assess(config, weather, now)
+        self.assertEqual(risk["score"], 30)
+        self.assertEqual(risk["forecast_score_6h"], 36)
+
+        # Conversely, future rain must be considered even if the first six
+        # entries (past midnight hours) were clear.
+        for hour in range(15, 21):
+            weather["hourly"]["precipitation_probability"][hour] = 100
+            weather["hourly"]["cloud_cover"][hour] = 90
+        for hour in range(0, 6):
+            weather["hourly"]["precipitation_probability"][hour] = 0
+            weather["hourly"]["cloud_cover"][hour] = 10
+        rainy_future = smart.assess(config, weather, now)
+        # A wetter outlook must not lower today's direct pollen assessment.
+        self.assertEqual(rainy_future["forecast_score_6h"], 30)
+
     def test_malformed_weather_shapes_and_nonfinite_values_do_not_crash_or_boost(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
         config = smart.normalize_config({})

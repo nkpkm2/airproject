@@ -302,14 +302,35 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     forecast_score = score
     if weather and isinstance(weather.get("hourly"), dict):
         hourly = weather["hourly"]
+        times = hourly.get("time", [])
         temps = hourly.get("temperature_2m", [])
         probs = hourly.get("precipitation_probability", [])
         clouds = hourly.get("cloud_cover", [])
-        temps = temps[:6] if isinstance(temps, list) else []
-        probs = probs[:6] if isinstance(probs, list) else []
-        clouds = clouds[:6] if isinstance(clouds, list) else []
+        times = times if isinstance(times, list) else []
+        temps = temps if isinstance(temps, list) else []
+        probs = probs if isinstance(probs, list) else []
+        clouds = clouds if isinstance(clouds, list) else []
+        # Open-Meteo's local hourly arrays begin at midnight. Taking [:6]
+        # therefore examines past hours for most of the day and can pre-ramp
+        # (or suppress) the controller for weather that has already happened.
+        # Select timestamped observations in the actual next-six-hour window.
+        hourly_zone = resolve_timezone(weather.get("timezone") or config.get("timezone", "Asia/Shanghai"))
+        window_end = now_local + timedelta(hours=6)
+        forecast_indices: list[int] = []
+        for index, value in enumerate(times):
+            if index >= max(len(temps), len(probs), len(clouds)) or not isinstance(value, str):
+                continue
+            try:
+                sample_at = datetime.fromisoformat(value)
+                if sample_at.tzinfo is None:
+                    sample_at = sample_at.replace(tzinfo=hourly_zone)
+                sample_at = sample_at.astimezone(now_local.tzinfo)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if now_local <= sample_at <= window_end:
+                forecast_indices.append(index)
         delta = 0
-        for index in range(max(len(temps), len(probs), len(clouds))):
+        for index in forecast_indices:
             temp = _finite_number(temps[index]) if index < len(temps) else None
             rain_probability = _finite_number(probs[index]) if index < len(probs) else None
             cloud = _finite_number(clouds[index]) if index < len(clouds) else None

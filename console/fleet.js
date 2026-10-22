@@ -40,8 +40,11 @@ function renderSmart(snapshot,populate=false){
   $('smart-indicator').textContent=enabled?'运行中':'暂停';$('smart-indicator').className=`smart-indicator ${enabled?'running':''}`;
   $('smart-risk').textContent=`当前 ${riskLabel(snapshot.effective_tier)} · 预测 ${riskLabel(risk.forecast_tier_6h)}`;$('smart-risk').className=`risk-badge ${snapshot.effective_tier||'weak'}`;
   $('smart-refresh').textContent=snapshot.weather?.fetched_at_ms?`天气(Open-Meteo) ${new Date(snapshot.weather.fetched_at_ms).toLocaleTimeString()}`:snapshot.weather_error?'天气读取失败':'等待天气数据';
+  const pollen=snapshot.official_pollen, pollenLabels={1:'弱',2:'正常',3:'高',4:'极高'};
+  const pollenAgeHours=pollen?(Date.now()-Number(pollen.published_at_ms))/3600000:Infinity;
+  $('official-pollen-status').textContent=pollen?`${pollenAgeHours>=0&&pollenAgeHours<=48?'自动读取并参与评分':'已读取但公告过旧/日期异常，未参与评分'}：${pollenLabels[pollen.level]||'未判定'} · 公告日期 ${new Date(pollen.published_at_ms).toLocaleString()} · 最近抓取 ${new Date(pollen.fetched_at_ms).toLocaleTimeString()} · ${pollen.evidence||''}`:snapshot.official_pollen_error?`自动读取未采纳：${snapshot.official_pollen_error}`:config.official_url?'已配置来源，等待读取并校验公告':'官方预报尚未配置';
   const capacity=snapshot.capacity||{};const ach=capacity.nominal_air_changes_per_hour||{},flow=capacity.total_airflow_m3h||{};
-  $('capacity-summary').textContent=`房间体积 ${capacity.volume_m3??'—'} m³｜全 ${config.device_count??'—'} 台：低 ${flow.low??'—'} m³/h（${ach.low??'—'} 次/h），中 ${flow.medium??'—'}（${ach.medium??'—'} 次/h），高 ${flow.high??'—'}（${ach.high??'—'} 次/h）；15×需 ${capacity.target_15x_m3h??'—'}、20×需 ${capacity.target_20x_m3h??'—'} m³/h。`;
+  $('capacity-summary').textContent=`房间体积 ${capacity.volume_m3??'—'} m³｜全 ${config.device_count??'—'} 台：低 ${flow.low??'—'} m³/h（${ach.low??'—'} 次/h），中 ${flow.medium??'—'}（${ach.medium??'—'} 次/h），高 ${flow.high??'—'}（${ach.high??'—'} 次/h）；15×需 ${capacity.target_15x_m3h??'—'}、20×需 ${capacity.target_20x_m3h??'—'} m³/h。${capacity.capacity_caveat||''}`;
   $('smart-explanation').textContent=(risk.reasons||[]).join('； ')||'尚无足够信号';
   const configured=Object.keys(config.baselines||{}).length,calibrated=(snapshot.devices||[]).filter(device=>config.baselines?.[device.device_id]&&device.calibrated).length;
   $('smart-warning').textContent=!configured?'尚未配置设备基准；策略不会向设备发送命令。':!calibrated?'已选设备中没有可用标定；请先完成光传感器校准，自动调控不会按未知灯态盲目操作。':`已配置 ${configured} 台，其中 ${calibrated} 台具备标定；仅控制在线且状态可判定设备，手动命令与自动策略不会互相抢占。`;

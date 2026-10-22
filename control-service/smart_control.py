@@ -86,7 +86,7 @@ def normalize_config(source: object) -> dict[str, Any]:
     for key in ("official_level", "social_level"):
         maximum = 4 if key == "official_level" else 3
         try: value[key] = min(maximum, max(0, int(value.get(key, 0))))
-        except (TypeError, ValueError): raise ValueError(f"{key} 必须是 0–3")
+        except (TypeError, ValueError): raise ValueError("official_level 必须是 0–4，social_level 必须是 0–3")
     value["official_note"] = str(value.get("official_note", "")).strip()[:500]
     value["official_url"] = str(value.get("official_url", "")).strip()[:500]
     value["official_peak_at"] = str(value.get("official_peak_at", "")).strip()[:40]
@@ -120,6 +120,11 @@ def house_capacity(config: dict[str, Any]) -> dict[str, Any]:
         "total_airflow_m3h": {key: round(value, 1) for key, value in totals.items()},
         "nominal_air_changes_per_hour": {key: math.floor(value / volume * 100 + 0.5) / 100 if volume else 0 for key, value in totals.items()},
         "target_15x_m3h": round(volume * 15, 1), "target_20x_m3h": round(volume * 20, 1),
+        "high_meets_15x_nominal": totals["high"] >= volume * 15,
+        "high_meets_20x_nominal": totals["high"] >= volume * 20,
+        "capacity_caveat": ("标称总风量低于 15 次/小时目标；且实际 CADR 通常不高于风量，不能据此宣称满足该洁净目标。"
+                            if totals["high"] < volume * 15 else
+                            "标称风量达到 15 次/小时对照值，但仍需设备 CADR、滤网效率和房间实测验证。"),
         "warning": "按设备标称风量估算的循环风量，不等于颗粒物 CADR；真实洁净能力还取决于滤网效率、密封和实际风量。",
     }
 
@@ -132,10 +137,22 @@ def _local_now(config: dict[str, Any], now: datetime | None = None) -> datetime:
 
 
 def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime | None = None,
-           previous_peak_at: float | None = None) -> dict[str, Any]:
+           previous_peak_at: float | None = None,
+           official_signal: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return explainable 0–100 outdoor/indoor pollen risk and a stable tier."""
     now_local = _local_now(config, now)
     official = int(config.get("official_level", 0))
+    official_source = "operator_entry"
+    if official_signal:
+        try:
+            fetched_age = now_local.timestamp() - float(official_signal.get("fetched_at_ms", 0)) / 1000
+            published_age = now_local.timestamp() - float(official_signal.get("published_at_ms", 0)) / 1000
+            candidate = int(official_signal.get("level", 0))
+            if 0 <= fetched_age <= 2 * 3600 and 0 <= published_age <= 48 * 3600 and 1 <= candidate <= 4:
+                official = candidate
+                official_source = "verified_gov_cn_page"
+        except (TypeError, ValueError):
+            pass
     social = int(config.get("social_level", 0))
     official_time = config.get("official_updated_at")
     social_time = config.get("social_updated_at")
@@ -147,6 +164,8 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             else: reasons = []
         except (TypeError, ValueError): reasons = []
     else: reasons = []
+    if official_signal and official_source != "verified_gov_cn_page":
+        reasons.append("自动读取的官方预报超过控制有效期或时间异常，未参与控制")
     if social and social_time:
         try:
             if now_local.timestamp() - float(social_time) / 1000 > 12 * 3600:
@@ -164,7 +183,7 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             score += 4
             reasons.append("处于本地配置的柏科花粉季节；季节信息只作观察提示")
     if official:
-        reasons.append(f"本地官方/人工柏科花粉级别 {official}/3（主信号）")
+        reasons.append(f"本地官方/人工柏科花粉级别 {official}/4（主信号）")
     else:
         reasons.append("尚未录入当地柏科花粉预报；季节和天气不能单独证明空气中花粉浓度")
 
@@ -260,7 +279,7 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     return {"score": score, "forecast_score_6h": forecast_score, "tier": tier, "forecast_tier_6h": forecast_tier,
             "tier_label": {"weak": "弱", "normal": "正常", "high": "高", "extreme": "极高"}[tier],
             "reasons": reasons, "evening_boost": evening, "preboost_active": preboost, "as_of": now_local.isoformat(),
-            "sources": {"official_pollen": "operator_entry", "weather": "Open-Meteo weather forecast" if weather else "unavailable",
+            "sources": {"official_pollen": official_source, "weather": "Open-Meteo weather forecast" if weather else "unavailable",
                         "social": "operator_entry"}}
 
 
@@ -291,7 +310,7 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
         raise ValueError("公告未明确提到柏科/侧柏，避免把杂草花粉误当柏花粉")
     context = " … ".join(text[max(0, index - 300):min(len(text), index + 1_200)] for index in positions[:4])
     if re.search(r"极高|爆表|非常高|\b(?:4|5)\s*级\b|4\s*(?:到|至|[-~～])\s*5\s*级", context): level = 4
-    elif re.search(r"高峰|高浓度|浓度较高|高风险|\b3\s*级\b|3\s*(?:到|至|[-~～])\s*4\s*级", context): level = 3
+    elif re.search(r"高峰|高浓度|浓度(?:较)?高|水平较高|高风险|\b3\s*级\b|3\s*(?:到|至|[-~～])\s*4\s*级", context): level = 3
     elif re.search(r"中等|中度|\b2\s*级\b|适中", context): level = 2
     elif re.search(r"低浓度|较低|偏低|\b1\s*级\b|低风险", context): level = 1
     else: raise ValueError("公告提到柏科但没有可判读的浓度级别/高峰信息")

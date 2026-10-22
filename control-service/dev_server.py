@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json, os, re, subprocess, sys, threading, time, urllib.parse, urllib.request
+from datetime import datetime
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -57,6 +58,9 @@ SMART_CONFIG = load_smart_config()
 SMART_RUNTIME = load_smart_runtime()
 SMART_RUNTIME.setdefault("weather", None)
 SMART_RUNTIME.setdefault("weather_fetched_at", 0)
+SMART_RUNTIME.setdefault("official_pollen", None)
+SMART_RUNTIME.setdefault("official_pollen_fetched_at", 0)
+SMART_RUNTIME.setdefault("official_pollen_error", "")
 SMART_RUNTIME.setdefault("last_peak_at", 0)
 SMART_RUNTIME.setdefault("effective_tier", "weak")
 SMART_RUNTIME.setdefault("candidate_tier", "weak")
@@ -384,6 +388,47 @@ def fetch_smart_weather(config: dict) -> dict:
         "attribution": "Open-Meteo weather forecast; not a Cupressaceae pollen forecast",
     }
 
+def validate_official_pollen_url(url: str) -> str:
+    """Restrict remote reads to HTTPS pages hosted by government domains."""
+    parsed = urllib.parse.urlsplit(str(url or "").strip())
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if (parsed.scheme != "https" or not host or not (host == "gov.cn" or host.endswith(".gov.cn"))
+            or parsed.username or parsed.password or parsed.port not in (None, 443)
+            or parsed.fragment):
+        raise ValueError("官方花粉预报只允许读取 HTTPS 的 *.gov.cn 页面")
+    return urllib.parse.urlunsplit(("https", parsed.netloc, parsed.path or "/", parsed.query, ""))
+
+class _GovOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        validate_official_pollen_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+def fetch_official_pollen(config: dict) -> dict:
+    """Read a small, fresh explicit Cupressaceae forecast from a government page."""
+    source_url = validate_official_pollen_url(config.get("official_url", ""))
+    request = urllib.request.Request(source_url, headers={
+        "User-Agent": "AirProject-SmartControl/1.0 (+local purifier controller)",
+        "Accept": "text/html,application/xhtml+xml",
+    })
+    opener = urllib.request.build_opener(_GovOnlyRedirectHandler())
+    with opener.open(request, timeout=8) as response:
+        validate_official_pollen_url(response.geturl())
+        content_type = response.headers.get_content_type().lower()
+        if content_type not in {"text/html", "application/xhtml+xml"}:
+            raise ValueError("官方来源没有返回 HTML 页面")
+        content_length = response.headers.get("Content-Length")
+        if content_length and int(content_length) > 500_000:
+            raise ValueError("官方预报网页超过 500 KB 安全上限")
+        raw = response.read(500_001)
+        if len(raw) > 500_000:
+            raise ValueError("官方预报网页超过 500 KB 安全上限")
+        charset = response.headers.get_content_charset() or "utf-8"
+    page = raw.decode(charset, errors="replace")
+    result = smart_control.parse_official_pollen_page(
+        page, datetime.now(smart_control.resolve_timezone(config.get("timezone", "Asia/Shanghai"))))
+    result.update({"fetched_at_ms": int(time.time() * 1000), "source_url": source_url})
+    return result
+
 def geocode_smart_location(query: str) -> list[dict]:
     query = query.strip()[:120]
     if len(query) < 2: raise ValueError("请输入至少两个字的城市/地区名")
@@ -430,10 +475,13 @@ def smart_snapshot() -> dict:
         return {
             "config": config,
             "enabled": bool(config["enabled"]),
-            "risk": smart_control.assess(config, runtime.get("weather"), previous_peak_at=runtime.get("last_peak_at") or None),
+            "risk": smart_control.assess(config, runtime.get("weather"), previous_peak_at=runtime.get("last_peak_at") or None,
+                                          official_signal=runtime.get("official_pollen") if isinstance(runtime.get("official_pollen"), dict) and runtime["official_pollen"].get("source_url") == config.get("official_url") else None),
             "capacity": smart_control.house_capacity(config),
             "weather": runtime.get("weather"),
             "weather_error": runtime.get("weather_error", ""),
+            "official_pollen": runtime.get("official_pollen") if isinstance(runtime.get("official_pollen"), dict) and runtime["official_pollen"].get("source_url") == config.get("official_url") else None,
+            "official_pollen_error": runtime.get("official_pollen_error", ""),
             "effective_tier": runtime.get("effective_tier", "weak"),
             "devices": visible,
             "updated_at_ms": now,
@@ -485,9 +533,25 @@ def smart_controller_loop() -> None:
                 with LOCK:
                     SMART_RUNTIME["weather_error"] = str(error)[:240]
                     SMART_RUNTIME["weather_fetched_at"] = now_s
+        pollen_url = str(config.get("official_url") or "").strip()
+        pollen_fetched_at = float(SMART_RUNTIME.get("official_pollen_fetched_at", 0))
+        if pollen_url and now_s - pollen_fetched_at >= 3600:
+            try:
+                value = fetch_official_pollen(config)
+                with LOCK:
+                    SMART_RUNTIME["official_pollen"] = value
+                    SMART_RUNTIME["official_pollen_fetched_at"] = now_s
+                    SMART_RUNTIME["official_pollen_error"] = ""
+            except Exception as error:
+                with LOCK:
+                    SMART_RUNTIME["official_pollen_error"] = str(error)[:240]
+                    SMART_RUNTIME["official_pollen_fetched_at"] = now_s
         with LOCK:
             weather = SMART_RUNTIME.get("weather")
-            risk = smart_control.assess(config, weather, previous_peak_at=SMART_RUNTIME.get("last_peak_at") or None)
+            pollen_signal = SMART_RUNTIME.get("official_pollen")
+            if not pollen_signal or pollen_signal.get("source_url") != pollen_url: pollen_signal = None
+            risk = smart_control.assess(config, weather, previous_peak_at=SMART_RUNTIME.get("last_peak_at") or None,
+                                        official_signal=pollen_signal)
             rank = {name: index for index, name in enumerate(smart_control.LEVELS)}
             desired = max(risk["tier"], risk["forecast_tier_6h"], key=lambda item: rank[item])
             current = SMART_RUNTIME.get("effective_tier", "weak")
@@ -926,7 +990,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = self.read_json()
                 config = smart_control.normalize_config(body)
                 with LOCK:
-                    previous = SMART_CONFIG
+                    previous = dict(SMART_CONFIG)
                     if any(config.get(key) != previous.get(key) for key in ("official_level", "official_note", "official_url", "official_peak_at")) or (config["official_level"] and not config.get("official_updated_at")):
                         config["official_updated_at"] = int(time.time() * 1000)
                     if any(config.get(key) != previous.get(key) for key in ("social_level", "social_note")) or (config["social_level"] and not config.get("social_updated_at")):
@@ -942,6 +1006,10 @@ class Handler(BaseHTTPRequestHandler):
                             raise ValueError("启用前至少要为一台已完成四路光传感器标定的设备设置基准档位")
                     SMART_CONFIG.clear(); SMART_CONFIG.update(config); save_smart_config()
                     SMART_RUNTIME["weather_fetched_at"] = 0
+                    if config.get("official_url") != previous.get("official_url"):
+                        SMART_RUNTIME["official_pollen"] = None
+                        SMART_RUNTIME["official_pollen_fetched_at"] = 0
+                        SMART_RUNTIME["official_pollen_error"] = ""
                     SMART_RUNTIME["last_config_error"] = ""
                     for action in SMART_RUNTIME.setdefault("device_actions", {}).values():
                         if isinstance(action, dict): action.update(paused=False, failure_count=0, error="")

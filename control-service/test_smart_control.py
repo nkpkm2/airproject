@@ -93,6 +93,70 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(result["nominal_air_changes_per_hour"]["low"], 1.15)
         self.assertEqual(result["nominal_air_changes_per_hour"]["high"], 8.63)
         self.assertIn("不等于颗粒物 CADR", result["warning"])
+        self.assertFalse(result["high_meets_15x_nominal"])
+        self.assertIn("低于 15 次/小时", result["capacity_caveat"])
+
+    def test_official_pollen_page_parser_requires_fresh_cupressaceae_evidence(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        page = "<html><p>发布时间：2026年4月1日</p><p>柏科花粉浓度极高，侧柏进入散粉高峰</p></html>"
+        self.assertEqual(smart.parse_official_pollen_page(page, now)["level"], 4)
+        stale = page.replace("2026年4月1日", "2026年3月20日")
+        with self.assertRaisesRegex(ValueError, "最近 7 天"):
+            smart.parse_official_pollen_page(stale, now)
+        weeds_only = page.replace("柏科", "蒿草").replace("侧柏", "杂草")
+        with self.assertRaisesRegex(ValueError, "未明确提到柏科"):
+            smart.parse_official_pollen_page(weeds_only, now)
+        undated = "<p>柏科花粉浓度极高，侧柏进入散粉高峰</p>"
+        with self.assertRaisesRegex(ValueError, "发布日期"):
+            smart.parse_official_pollen_page(undated, now)
+
+    def test_official_page_fetch_is_limited_to_https_gov_cn(self):
+        self.assertEqual(server.validate_official_pollen_url("https://www.beijing.gov.cn/a/b.html"),
+                         "https://www.beijing.gov.cn/a/b.html")
+        for url in ("http://beijing.gov.cn/a", "https://beijing.gov.cn.evil.test/a",
+                    "https://user@beijing.gov.cn/a", "https://127.0.0.1/a"):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                server.validate_official_pollen_url(url)
+
+    def test_official_page_fetch_reads_bounded_html_and_records_source(self):
+        class Headers:
+            def get_content_type(self): return "text/html"
+            def get_content_charset(self): return "utf-8"
+            def get(self, key): return None
+        class Response:
+            headers = Headers()
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def geturl(self): return "https://www.beijing.gov.cn/forecast.html"
+            def read(self, limit):
+                self.read_limit = limit
+                return f"<p>发布日期：{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y年%m月%d日')}</p><p>柏科花粉浓度高</p>".encode()
+        class Opener:
+            def __init__(self): self.response = Response()
+            def open(self, request, timeout):
+                self.request = request; self.timeout = timeout
+                return self.response
+        opener = Opener()
+        config = smart.default_config(); config["official_url"] = opener.response.geturl()
+        with patch.object(server.urllib.request, "build_opener", return_value=opener):
+            result = server.fetch_official_pollen(config)
+        self.assertEqual(result["level"], 3)
+        self.assertEqual(result["source_url"], opener.response.geturl())
+        self.assertEqual(opener.response.read_limit, 500_001)
+        self.assertEqual(opener.timeout, 8)
+
+    def test_automatic_official_signal_overrides_manual_only_when_fresh(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({"official_level": 1})
+        signal = {"level": 4, "published_at_ms": int(now.timestamp() * 1000),
+                  "fetched_at_ms": int(now.timestamp() * 1000)}
+        result = smart.assess(config, None, now, official_signal=signal)
+        self.assertEqual(result["sources"]["official_pollen"], "verified_gov_cn_page")
+        self.assertEqual(result["tier"], "extreme")
+        stale = dict(signal, published_at_ms=int((now.timestamp() - 49 * 3600) * 1000))
+        result = smart.assess(config, None, now, official_signal=stale)
+        self.assertEqual(result["sources"]["official_pollen"], "operator_entry")
+        self.assertEqual(result["tier"], "weak")
 
     def test_enable_requires_location(self):
         with self.assertRaisesRegex(ValueError, "坐标"):

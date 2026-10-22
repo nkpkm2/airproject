@@ -63,8 +63,8 @@
           <label>高档标称风量 (m³/h)<input id="flow-high" type="number" min="0" max="2000"></label>
         </div><div id="capacity-summary" class="capacity-summary">—</div><p class="smart-note">按风量计算的是名义循环换气次数，不等于颗粒物 CADR 或实际洁净效果；15×/20×只作能力对照，系统不会虚报达标。</p></section>
         <section class="smart-box"><h3>花粉与环境信号</h3><div class="smart-grid">
-          <label>官方柏科花粉预报<select id="official-level"><option value="0">未知 / 未发布</option><option value="1">弱</option><option value="2">高</option><option value="3">极高</option></select></label>
-          <label>官方预报来源链接<input id="official-url" type="url" placeholder="当地园林/气象/疾控公告"></label>
+          <label>官方柏科花粉预报<select id="official-level"><option value="0">未知 / 未发布</option><option value="1">弱</option><option value="2">正常</option><option value="3">高</option><option value="4">极高</option></select></label>
+          <label>官方预报来源链接<input id="official-url" type="url" placeholder="当地园林/气象/疾控的 HTTPS 公告"></label>
           <label class="wide">官方预报备注<input id="official-note" maxlength="500" placeholder="预报日期、发布时间、柏科/侧柏等级"></label>
           <label class="wide">官方预测高峰时间<input id="official-peak" type="datetime-local"><small>填写本地预报中的开始/最强时段；设置提前量后会提前预升档</small></label>
           <label>柏科季节起始 (MM-DD)<input id="season-start" maxlength="5" placeholder="03-01"></label><label>柏科季节结束 (MM-DD)<input id="season-end" maxlength="5" placeholder="05-15"></label>
@@ -74,7 +74,7 @@
           <label>持续分钟<input id="evening-minutes" type="number" min="0" max="240"></label>
           <label>预报提前量 (分钟)<input id="preboost-minutes" type="number" min="0" max="360"></label>
           <label>峰后室内余效 (小时)<input id="residual-hours" type="number" min="0" max="72"></label>
-        </div><p class="smart-note">天气温度、降雨、日照和轻风只作有限辅助；社交信号有噪声且权重封顶。天气由 <a href="https://open-meteo.com/en/docs" target="_blank" rel="noreferrer">Open-Meteo</a> 提供并注明来源。其全球花粉 API 当前不含中国柏科花粉浓度，故不会用天气冒充柏花粉实测值。<a href="https://index.baidu.com/Helper" target="_blank" rel="noreferrer">百度指数官方说明</a>暂不提供开放 API；社交平台数据需走授权能力。</p></section>
+        </div><p class="smart-note">填入当地园林/气象/疾控公告后，系统每小时尝试读取一次：仅接受 HTTPS 的政府域名页面，要求正文明确出现柏科/侧柏及新近发布日期；无法可靠判级时不会自动采用。天气温度、降雨、日照和轻风只作有限辅助；社交信号有噪声且权重封顶，暂需人工核验。天气由 <a href="https://open-meteo.com/en/docs" target="_blank" rel="noreferrer">Open-Meteo</a> 提供并注明来源。其全球花粉 API 当前不含中国柏科花粉浓度，故不会用天气冒充柏花粉实测值。<a href="https://index.baidu.com/Helper" target="_blank" rel="noreferrer">百度指数官方说明</a>暂不提供开放 API；社交平台数据需走授权能力。</p><div id="official-pollen-status" class="smart-note">官方预报尚未配置</div></section>
       </div>
       <section class="smart-box smart-device-box"><div class="smart-device-head"><h3>设备基准档位</h3><span>花粉弱时恢复此档；关机基准不会被自动开机</span></div><div id="smart-devices" class="smart-device-list"></div></section>
       <div id="smart-explanation" class="smart-explanation">—</div>

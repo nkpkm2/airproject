@@ -690,7 +690,7 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
     if not positions:
         raise ValueError("公告未明确提到柏科/侧柏，避免把杂草花粉误当柏花粉")
     context = " … ".join(text[max(0, index - 300):min(len(text), index + 1_200)] for index in positions[:4])
-    numeric_range = re.search(r"(?<!\d)([1-5])\s*级?\s*(?:到|至|[-~～])\s*([1-5])\s*级", context)
+    numeric_range = re.search(r"(?<!\d)([1-5])\s*级?\s*(?:到|至|[-~～—–－])\s*([1-5])\s*级", context)
     if numeric_range and _has_unnegated_phrase(re.escape(numeric_range.group(0)), context):
         # Do not promote a band such as “3到4级（中等到高级别）” to its
         # upper endpoint; choose the lower bound to avoid overreacting to an
@@ -706,7 +706,7 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
     approximate_peak_window = False
     date_pattern = re.compile(
         r"(?:(20\d{2})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]"
-        r"(?:\s*(?:至|到|[-~～])\s*(?:(20\d{2})\s*年\s*)?(?:(\d{1,2})\s*月\s*)?(\d{1,2})\s*[日号])?"
+        r"(?:\s*(?:至|到|[-~～—–－])\s*(?:(20\d{2})\s*年\s*)?(?:(\d{1,2})\s*月\s*)?(\d{1,2})\s*[日号])?"
     )
     for peak_match in re.finditer(r"高峰(?:日|期)?|达峰|峰值", text):
         window_start = max(0, peak_match.start() - 180)
@@ -750,7 +750,7 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
         # as a date window instead of silently losing the advance forecast.
         period_pattern = re.compile(
             r"(?:(20\d{2})\s*年\s*)?(\d{1,2})\s*月\s*(中下旬|上中旬|上旬|中旬|下旬)"
-            r"(?:\s*(?:至|到|[-~～])\s*(?:(20\d{2})\s*年\s*)?"
+            r"(?:\s*(?:至|到|[-~～—–－])\s*(?:(20\d{2})\s*年\s*)?"
             r"(?:(\d{1,2})\s*月\s*)?(中下旬|上中旬|上旬|中旬|下旬))?"
         )
         def period_bounds(year: int, month: int, label: str) -> tuple[date, date]:

@@ -378,7 +378,7 @@ class SmartControlTests(unittest.TestCase):
         # For official ranges, use the lower bound rather than accidentally
         # matching the upper endpoint as a standalone level.
         for band, expected_level in (("1到2级", 1), ("2至3级", 2),
-                                     ("3到4级", 3), ("4-5级", 4)):
+                                     ("3到4级", 3), ("3—4级", 3), ("4-5级", 4)):
             with self.subTest(official_level_band=band):
                 band_page = (
                     "<p>发布日期：2026年4月1日</p>"
@@ -386,6 +386,14 @@ class SmartControlTests(unittest.TestCase):
                 )
                 parsed_band = smart.parse_official_pollen_page(band_page, now)
                 self.assertEqual(parsed_band["level"], expected_level)
+
+        em_dash_window = (
+            "<p>发布日期：2026年4月1日</p>"
+            "<p>柏科花粉浓度高，4月5日—8日预计为高峰期。</p>"
+        )
+        parsed_em_dash_window = smart.parse_official_pollen_page(em_dash_window, now)
+        self.assertEqual(parsed_em_dash_window["predicted_peak_at"], "2026-04-05T10:00:00+08:00")
+        self.assertEqual(parsed_em_dash_window["predicted_peak_until"], "2026-04-08T23:59:59+08:00")
 
     def test_official_peak_window_keeps_recent_multiday_forecast_valid_through_its_end(self):
         config = smart.normalize_config({})

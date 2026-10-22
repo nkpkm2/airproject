@@ -445,6 +445,9 @@ class SmartControlTests(unittest.TestCase):
         risk = smart.assess(config, weather, now)
         self.assertEqual(risk["score"], 30)
         self.assertEqual(risk["forecast_score_6h"], 36)
+        self.assertEqual(risk["forecast_hours_used"], 6)
+        self.assertEqual(risk["forecast_weather_adjustment"], 6)
+        self.assertTrue(any("6 个整点样本" in reason for reason in risk["reasons"]))
 
         # Conversely, future rain must be considered even if the first six
         # entries (past midnight hours) were clear.

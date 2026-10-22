@@ -300,6 +300,8 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         reasons.append("下班回家时段增强已生效（开始时间及持续时间可配置）")
 
     forecast_score = score
+    forecast_hours_used = 0
+    forecast_weather_adjustment = 0.0
     if weather and isinstance(weather.get("hourly"), dict):
         hourly = weather["hourly"]
         times = hourly.get("time", [])
@@ -338,7 +340,14 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
                     and rain_probability < 30 and cloud is not None and cloud < 45):
                 delta += 1
             if rain_probability is not None and rain_probability >= 60: delta -= 2
-        forecast_score = max(0, min(100, score + max(-6, min(6, delta))))
+        forecast_hours_used = len(forecast_indices)
+        forecast_score = max(score, max(0, min(100, score + max(-6, min(6, delta)))))
+        forecast_weather_adjustment = round(forecast_score - score, 1)
+        if forecast_hours_used:
+            reasons.append(
+                f"未来 6 小时天气参考 {forecast_hours_used} 个整点样本，"
+                f"预测评分净上调 {forecast_weather_adjustment:g} 分（上限 +6；天气不会下调当前花粉等级）"
+            )
     preboost = False
     peak_at = ((official_signal.get("predicted_peak_at") if official_signal else None)
                if official_source == "verified_gov_cn_page" else None) or config.get("official_peak_at")
@@ -364,6 +373,8 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         reasons.append(f"官方预报高峰即将到来，提前 {config.get('preboost_minutes', 45)} 分钟预升档")
     return {"score": score, "forecast_score_6h": forecast_score, "tier": tier, "forecast_tier_6h": forecast_tier,
             "tier_label": {"weak": "弱", "normal": "正常", "high": "高", "extreme": "极高"}[tier],
+            "forecast_hours_used": forecast_hours_used,
+            "forecast_weather_adjustment": forecast_weather_adjustment,
             "reasons": reasons, "evening_boost": evening, "preboost_active": preboost,
             "residual_active": residual_active, "residual_remaining_hours": round(residual_remaining_h, 2),
             "as_of": now_local.isoformat(),

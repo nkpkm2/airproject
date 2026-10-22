@@ -79,7 +79,23 @@ SMART_RUNTIME.setdefault("device_actions", {})
 SMART_RUNTIME.setdefault("last_error", "")
 
 def recover_smart_runtime_after_restart(runtime: dict) -> None:
-    """Fence off non-idempotent button pulses whose outcome may be ambiguous."""
+    """Reset observation clocks and fence off ambiguous physical button pulses."""
+    # The weather body is deliberately not persisted. Its persisted fetch time
+    # must not suppress a fresh request after restart, or the controller can
+    # sit without weather context for almost one entire refresh interval.
+    runtime["weather"] = None
+    runtime["weather_fetched_at"] = 0
+
+    # A service outage is not evidence that low risk persisted. Restart the
+    # downshift dwell from the first post-restart observation; keep the last
+    # effective tier so a higher newly observed risk can still escalate now.
+    effective = runtime.get("effective_tier", "weak")
+    if effective not in smart_control.LEVELS:
+        effective = "weak"
+        runtime["effective_tier"] = effective
+    runtime["candidate_tier"] = effective
+    runtime["candidate_since"] = time.time()
+
     actions = runtime.get("device_actions", {})
     if not isinstance(actions, dict): return
     for action in actions.values():

@@ -26,6 +26,29 @@ class SmartControlTests(unittest.TestCase):
         self.assertTrue(action["inflight"]["restart_recovery"])
         self.assertIn("重启后", action["status"])
 
+    def test_restart_discards_unavailable_weather_and_restarts_downshift_observation_dwell(self):
+        runtime = {"weather": None, "weather_fetched_at": 1_000_000,
+                   "effective_tier": "high", "candidate_tier": "weak", "candidate_since": 1,
+                   "device_actions": {}}
+        restarted_at = 2_000_000.0
+        with patch.object(server.time, "time", return_value=restarted_at):
+            server.recover_smart_runtime_after_restart(runtime)
+
+        self.assertIsNone(runtime["weather"])
+        self.assertEqual(runtime["weather_fetched_at"], 0)
+        self.assertEqual(runtime["effective_tier"], "high")
+        self.assertEqual(runtime["candidate_tier"], "high")
+        self.assertEqual(runtime["candidate_since"], restarted_at)
+
+        # Even if a lower tier is observed immediately after a long outage,
+        # that outage cannot satisfy the 90-minute continuous-evidence dwell.
+        current, candidate, since = smart.apply_hysteresis(
+            runtime["effective_tier"], runtime["candidate_tier"], runtime["candidate_since"],
+            "weak", restarted_at + 5)
+        self.assertEqual(current, "high")
+        self.assertEqual(candidate, "weak")
+        self.assertEqual(since, restarted_at + 5)
+
     def test_restarted_pulse_requires_a_new_matching_online_lamp_report(self):
         inflight = {"expected": "medium", "sent_at_ms": 1_000}
         self.assertEqual(server.restarted_pulse_recovery(inflight, "medium", 999, True, 2_000), "wait")

@@ -94,7 +94,7 @@ def recover_smart_runtime_after_restart(runtime: dict) -> None:
         effective = "weak"
         runtime["effective_tier"] = effective
     runtime["candidate_tier"] = effective
-    runtime["candidate_since"] = time.time()
+    runtime["candidate_since"] = time.monotonic()
 
     actions = runtime.get("device_actions", {})
     if not isinstance(actions, dict): return
@@ -629,6 +629,9 @@ def smart_controller_loop() -> None:
             config = json.loads(json.dumps(SMART_CONFIG))
             weather = SMART_RUNTIME.get("weather")
             fetched_at = float(SMART_RUNTIME.get("weather_fetched_at", 0))
+            # The 90-minute dwell measures elapsed runtime, not civil time.
+            # Keep wall-clock time below for dated feeds/schedules only.
+            policy_now_s = time.monotonic()
         if config.get("latitude") is not None and config.get("longitude") is not None and now_s - fetched_at >= 900:
             with LOCK:
                 if now_s - float(SMART_RUNTIME.get("weather_fetched_at", 0)) >= 900:
@@ -661,7 +664,7 @@ def smart_controller_loop() -> None:
                 current, candidate, candidate_since, _ = smart_control.end_evening_boost(
                     current, candidate, candidate_since, desired,
                     SMART_RUNTIME.get("evening_boost_base_tier"),
-                    bool(risk.get("residual_active")), now_s)
+                    bool(risk.get("residual_active")), policy_now_s)
                 SMART_RUNTIME["evening_boost_base_tier"] = None
             SMART_RUNTIME["evening_boost_active"] = bool(risk["evening_boost"])
             # Escalation is prompt; reduction requires 90 minutes of persistent
@@ -669,7 +672,7 @@ def smart_controller_loop() -> None:
             # single scheduled homecoming window is allowed to end on time only
             # when it alone lifted the tier and no residual floor remains.
             effective, next_candidate, next_candidate_since = smart_control.apply_hysteresis(
-                current, candidate, candidate_since, desired, now_s)
+                current, candidate, candidate_since, desired, policy_now_s)
             SMART_RUNTIME["effective_tier"] = effective
             SMART_RUNTIME["candidate_tier"] = next_candidate
             SMART_RUNTIME["candidate_since"] = next_candidate_since

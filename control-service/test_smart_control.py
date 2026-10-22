@@ -30,8 +30,8 @@ class SmartControlTests(unittest.TestCase):
         runtime = {"weather": None, "weather_fetched_at": 1_000_000,
                    "effective_tier": "high", "candidate_tier": "weak", "candidate_since": 1,
                    "device_actions": {}}
-        restarted_at = 2_000_000.0
-        with patch.object(server.time, "time", return_value=restarted_at):
+        restarted_at = 20_000.0
+        with patch.object(server.time, "monotonic", return_value=restarted_at):
             server.recover_smart_runtime_after_restart(runtime)
 
         self.assertIsNone(runtime["weather"])

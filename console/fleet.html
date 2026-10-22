@@ -48,6 +48,7 @@
     <form id="smart-form" method="dialog">
       <div class="smart-title"><div><small>家庭空气管理 · 自动策略</small><h2>智能调控</h2></div><button id="smart-close" type="button" aria-label="关闭">×</button></div>
       <div class="smart-status-row"><label class="smart-enable"><input id="smart-enabled" type="checkbox"> 启用自动调控</label><span id="smart-risk" class="risk-badge">正在读取</span><span id="smart-refresh" class="smart-updated">—</span></div>
+      <p id="smart-evidence" style="margin:4px 9px 0;color:#444;font-size:11px">花粉证据状态未知</p>
       <div class="smart-columns">
         <section class="smart-box"><h3>家庭与风量模型</h3><div class="smart-grid">
           <label>地区/地点<input id="smart-location" maxlength="80" placeholder="例如：北京市海淀区"><button id="smart-geocode" type="button">查找地区坐标</button><select id="smart-location-results" hidden aria-label="选择匹配地区"></select></label>
@@ -86,6 +87,6 @@
       <div class="smart-footer"><span id="smart-warning">未配置任何设备基准；策略不会向设备发送命令。</span><button id="smart-save" type="button">保存设置</button><button id="smart-apply" type="button" class="primary">保存并启用</button><button id="smart-pause" type="button">保存并暂停</button></div>
     </form>
   </dialog>
-  <script src="fleet.js?v=20261022-smart17"></script>
+  <script src="fleet.js?v=20261022-smart18"></script>
 </body>
 </html>

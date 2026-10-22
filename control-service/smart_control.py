@@ -703,8 +703,30 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         rank = {name: index for index, name in enumerate(LEVELS)}
         forecast_tier = LEVELS[min(len(LEVELS) - 1, max(rank[forecast_tier], rank[tier] + 1))]
         reasons.append(f"官方预报高峰即将到来，提前 {config.get('preboost_minutes', 45)} 分钟预升档")
+    # A risk tier is a control decision, not a claim that pollen was measured.
+    # Surface the evidence class explicitly so a seasonal/weather-only weak
+    # tier cannot be mistaken for a verified low-pollen reading.
+    if official > 0:
+        evidence_status = "official"
+        evidence_label = "有当前柏科官方/人工复核等级"
+    elif official_forecast_level > 0:
+        evidence_status = "forecast"
+        evidence_label = "有未来柏科预报；尚非当前浓度"
+    elif social > 0:
+        evidence_status = "supporting"
+        evidence_label = "仅有人工复核的过敏/社交辅助信号"
+    elif in_season and weather is not None and weather_context_active:
+        evidence_status = "supporting"
+        evidence_label = "仅有花粉季与天气辅助；当前柏科等级未知"
+    elif in_season:
+        evidence_status = "season_only"
+        evidence_label = "仅有花粉季背景；没有当前花粉观测"
+    else:
+        evidence_status = "insufficient"
+        evidence_label = "数据不足；当前花粉浓度未知"
     return {"score": score, "forecast_score_6h": forecast_score, "tier": tier, "forecast_tier_6h": forecast_tier,
             "tier_label": {"weak": "弱", "normal": "正常", "high": "高", "extreme": "极高"}[tier],
+            "evidence_status": evidence_status, "evidence_label": evidence_label,
             "forecast_hours_used": forecast_hours_used,
             "forecast_weather_adjustment": forecast_weather_adjustment,
             "forecast_components": forecast_components,

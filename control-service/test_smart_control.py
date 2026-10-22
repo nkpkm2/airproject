@@ -24,7 +24,7 @@ class SmartControlTests(unittest.TestCase):
         self.assertIn('id="smart-arrow"', page)
         self.assertIn('id="rain-suppression"', page)
         self.assertIn("fleet.css?v=20261022-smart17", page)
-        self.assertIn("fleet.js?v=20261022-smart17", page)
+        self.assertIn("fleet.js?v=20261022-smart18", page)
         self.assertIn("forecastPollenLevel=Number(pollen?.forecast_level||0)", script)
         self.assertIn("不是室内花粉清除时间", page)
         self.assertIn("rain_suppression:$('rain-suppression').checked", script)
@@ -961,6 +961,22 @@ class SmartControlTests(unittest.TestCase):
         in_season = smart.assess(local_season, weather, datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai")))
         self.assertTrue(in_season["weather_context_active"])
         self.assertGreater(in_season["score"], 0)
+
+    def test_evidence_label_distinguishes_unknown_from_current_pollen_observation(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        unknown = smart.assess(smart.normalize_config({}), None, now)
+        self.assertEqual(unknown["evidence_status"], "insufficient")
+        self.assertIn("浓度未知", unknown["evidence_label"])
+
+        seasonal = smart.assess(smart.normalize_config({
+            "season_start_md": "03-01", "season_end_md": "05-01",
+        }), None, now)
+        self.assertEqual(seasonal["evidence_status"], "season_only")
+
+        observed = smart.assess(smart.normalize_config({
+            "official_level": 2, "official_updated_at": int(now.timestamp() * 1000),
+        }), None, now)
+        self.assertEqual(observed["evidence_status"], "official")
 
     def test_stale_missing_or_future_weather_timestamp_is_ignored(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))

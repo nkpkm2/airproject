@@ -38,7 +38,7 @@ function riskLabel(tier){return({weak:'弱',normal:'正常',high:'高',extreme:'
 function renderSmart(snapshot,populate=false){
   smartSnapshot=snapshot;const config=snapshot.config||{},risk=snapshot.risk||{},enabled=!!snapshot.enabled;
   $('smart-indicator').textContent=enabled?'运行中':'暂停';$('smart-indicator').className=`smart-indicator ${enabled?'running':''}`;
-  $('smart-risk').textContent=`当前 ${riskLabel(snapshot.effective_tier)} · 预测 ${riskLabel(risk.forecast_tier_6h)}`;$('smart-risk').className=`risk-badge ${snapshot.effective_tier||'weak'}`;
+  $('smart-risk').textContent=`当前 ${riskLabel(snapshot.effective_tier)} · 预测 ${riskLabel(risk.forecast_tier_6h)}`;$('smart-risk').className=`risk-badge ${snapshot.effective_tier||'weak'}`;$('smart-evidence').textContent=risk.evidence_label||'花粉证据状态未知';$('smart-evidence').title='风险档位用于控制决策，不等于传感器直接测得室内花粉浓度。';
   const weatherFetchedAt=Number(snapshot.weather?.fetched_at_ms||0),weatherAgeMs=Date.now()-weatherFetchedAt,weatherFresh=weatherFetchedAt>0&&weatherAgeMs>=-300000&&weatherAgeMs<=3600000;
   $('smart-refresh').textContent=weatherFetchedAt&&!weatherFresh?`天气数据已过期，已忽略 · ${new Date(weatherFetchedAt).toLocaleTimeString()}`:weatherFresh?`天气(Open-Meteo) ${new Date(weatherFetchedAt).toLocaleTimeString()}`:snapshot.weather_error?'天气读取失败':'等待天气数据';
   const pollen=snapshot.official_pollen, pollenLabels={1:'弱',2:'正常',3:'高',4:'极高'};

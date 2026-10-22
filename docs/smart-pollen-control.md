@@ -30,6 +30,8 @@ The controller calculates an explainable 0–100 score:
 
 Score bands are weak `<18`, normal `18–41`, high `42–67`, extreme `≥68`; weather/social/season alone are prevented from classifying extreme. Current score includes bounded weather suppression; the six-hour forecast tier may pre-ramp but is never allowed to lower today's tier. Upward transitions are immediate; downshifts wait 90 minutes. The outdoor pollen signal is not a direct indoor sensor, so results are recommendations, not medical advice.
 
+The status row separately labels evidence quality: a current official/operator-reviewed Cupressaceae level, a future forecast that is not yet current, a supporting-only social/weather/season context, or insufficient data. The risk tier remains the control-policy output; it is not presented as a measured indoor pollen concentration. In particular, “weak” with no current pollen observation is explicitly labeled unknown rather than verified low.
+
 ## Fan target and physical actuation
 
 Each selected purifier has a user-defined weak-pollen baseline (`off`, low, medium, high, auto). An `off` baseline is never automatically powered on. Explicit fan speeds scale only within low → medium → high; auto remains auto because its actual airflow is appliance-controlled and is not guaranteed to be higher. Normal strength permits at most one step; high strength follows the risk tier up to two steps; extra strength advances one risk band earlier (so a low baseline reaches high at the normal tier). All targets saturate at the physical high mode; “extra” does not invent a turbo setting. Weak returns to the configured baseline.

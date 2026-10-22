@@ -640,6 +640,25 @@ class SmartControlTests(unittest.TestCase):
                 self.assertEqual(result["score"], baseline)
                 self.assertEqual(result["forecast_score_6h"], baseline)
 
+    def test_out_of_range_weather_fields_are_unknown_not_favorable_signals(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        fetched = int(now.timestamp() * 1000)
+        config = smart.normalize_config({"official_level": 1, "official_updated_at": fetched})
+        baseline = smart.assess(config, None, now)
+        weather = {
+            "fetched_at_ms": fetched,
+            "current": {"temperature_2m": 999, "relative_humidity_2m": -1,
+                        "precipitation": -0.1, "interval": 900, "cloud_cover": 10},
+            "daily": {"time": ["2026-04-01"], "sunshine_duration_s": [100_000],
+                      "precipitation_sum_mm": [-1]},
+            "hourly": {"time": ["2026-04-01T13:00"], "temperature_2m": [15],
+                       "relative_humidity_2m": [101], "precipitation_probability": [-1],
+                       "cloud_cover": [-1]},
+        }
+        result = smart.assess(config, weather, now)
+        self.assertEqual(result["score"], baseline["score"])
+        self.assertEqual(result["forecast_score_6h"], baseline["forecast_score_6h"])
+
     def test_weather_fetch_requests_and_preserves_four_days_of_daily_history(self):
         class Response:
             def __enter__(self): return self

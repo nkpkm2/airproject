@@ -188,6 +188,12 @@ def _finite_number(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _bounded_weather_number(value: Any, minimum: float, maximum: float) -> float | None:
+    """Reject malformed/out-of-physical-range weather fields as unknown."""
+    number = _finite_number(value)
+    return number if number is not None and minimum <= number <= maximum else None
+
+
 def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime | None = None,
            previous_peak_at: float | None = None,
            official_signal: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -275,11 +281,11 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         reasons.append("天气背景未计入花粉风险：尚无当地花粉季、有效柏科预报或有效人工趋势信号")
     if weather and weather_context_active and isinstance(weather.get("current"), dict):
         current = weather["current"]
-        temp = _finite_number(current.get("temperature_2m"))
-        humidity = _finite_number(current.get("relative_humidity_2m"))
-        rain = _finite_number(current.get("precipitation"))
-        rain_interval_s = _finite_number(current.get("interval"))
-        cloud = _finite_number(current.get("cloud_cover"))
+        temp = _bounded_weather_number(current.get("temperature_2m"), -90, 60)
+        humidity = _bounded_weather_number(current.get("relative_humidity_2m"), 0, 100)
+        rain = _bounded_weather_number(current.get("precipitation"), 0, 10_000)
+        rain_interval_s = _bounded_weather_number(current.get("interval"), 1, 7_200)
+        cloud = _bounded_weather_number(current.get("cloud_cover"), 0, 100)
         if temp is not None and 5 <= temp <= 22:
             weather_score += 6
             reasons.append(f"气温 {temp:g}°C 处于可能有利的释放温区（仅作弱辅助）")
@@ -295,8 +301,9 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         # not compared as if they had the same duration. Unknown intervals are
         # not scored rather than guessed.
         rain_rate = (rain * 3600 / rain_interval_s
-                     if rain is not None and rain_interval_s is not None
-                     and 0 < rain_interval_s <= 7200 else None)
+                     if rain is not None and rain_interval_s is not None else None)
+        if rain_rate is not None and not math.isfinite(rain_rate):
+            rain_rate = None
         if rain_rate is not None and rain_rate >= 3:
             weather_score -= 10
             reasons.append(f"近 {rain_interval_s / 60:g} 分钟降水 {rain:g} mm（折算雨强 {rain_rate:g} mm/h），短时花粉倾向明显下调（弱天气信号）")
@@ -322,13 +329,13 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             try: today_index = days.index(now_local.date().isoformat())
             except (ValueError, AttributeError): today_index = 0
             today_index = min(today_index, len(sunny) - 1, len(rain_sum) - 1)
-            today_sun_s = _finite_number(sunny[today_index])
-            today_rain = _finite_number(rain_sum[today_index])
+            today_sun_s = _bounded_weather_number(sunny[today_index], 0, 86_400)
+            today_rain = _bounded_weather_number(rain_sum[today_index], 0, 10_000)
             today_sun = today_sun_s / 3600 if today_sun_s is not None else None
             if today_rain is not None and today_rain > 1: weather_score -= 4
             elif today_rain is not None and today_rain < 1 and today_sun is not None and today_sun >= 8: weather_score += 4
             yesterday = today_index - 1
-            yesterday_rain = _finite_number(rain_sum[yesterday]) if yesterday >= 0 else None
+            yesterday_rain = _bounded_weather_number(rain_sum[yesterday], 0, 10_000) if yesterday >= 0 else None
             if (yesterday_rain is not None and yesterday_rain > 1 and today_rain is not None and today_rain < 1
                     and today_sun is not None and today_sun >= 6 and temp is not None and 5 <= temp <= 22):
                 weather_score += 3
@@ -401,10 +408,10 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
                 forecast_indices.append(index)
         delta = 0
         for index in forecast_indices:
-            temp = _finite_number(temps[index]) if index < len(temps) else None
-            humidity = _finite_number(humidities[index]) if index < len(humidities) else None
-            rain_probability = _finite_number(probs[index]) if index < len(probs) else None
-            cloud = _finite_number(clouds[index]) if index < len(clouds) else None
+            temp = _bounded_weather_number(temps[index], -90, 60) if index < len(temps) else None
+            humidity = _bounded_weather_number(humidities[index], 0, 100) if index < len(humidities) else None
+            rain_probability = _bounded_weather_number(probs[index], 0, 100) if index < len(probs) else None
+            cloud = _bounded_weather_number(clouds[index], 0, 100) if index < len(clouds) else None
             if (temp is not None and 5 <= temp <= 22 and rain_probability is not None
                     and rain_probability < 30 and cloud is not None and cloud < 45):
                 delta += 1

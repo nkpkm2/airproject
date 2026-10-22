@@ -220,13 +220,25 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         sunny = forecast.get("sunshine_duration_s", [])
         rain_sum = forecast.get("precipitation_sum_mm", [])
         if sunny and rain_sum:
-            today_sun = float(sunny[0] or 0) / 3600
-            today_rain = float(rain_sum[0] or 0)
+            days = forecast.get("time", [])
+            try: today_index = days.index(now_local.date().isoformat())
+            except (ValueError, AttributeError): today_index = 0
+            today_index = min(today_index, len(sunny) - 1, len(rain_sum) - 1)
+            today_sun = float(sunny[today_index] or 0) / 3600
+            today_rain = float(rain_sum[today_index] or 0)
             if today_rain > 1: weather_score -= 4
             elif today_sun >= 8: weather_score += 4
-            if len(sunny) >= 4 and all(float(sunny[i] or 0) / 3600 >= 8 and float(rain_sum[i] or 0) < 1 for i in range(min(4, len(sunny)))):
-                weather_score -= 3  # bounded proxy for possible seasonal depletion
-                reasons.append("连续晴天后的花粉储量变化仅作轻微折减，不替代实测预报")
+            yesterday = today_index - 1
+            if (yesterday >= 0 and float(rain_sum[yesterday] or 0) > 1 and today_rain < 1
+                    and today_sun >= 6 and isinstance(temp, (int, float)) and 5 <= temp <= 22):
+                weather_score += 3
+                reasons.append("前一日降雨后转为温暖晴朗，释放/扩散可能性仅作轻微上调")
+            recent_days = range(max(0, today_index - 3), today_index + 1)
+            if (len(list(recent_days)) == 4 and all(
+                    i < len(sunny) and i < len(rain_sum) and float(sunny[i] or 0) / 3600 >= 8
+                    and float(rain_sum[i] or 0) < 1 for i in recent_days)):
+                weather_score -= 3  # weak lagged proxy; future sunshine is not prior pollen depletion
+                reasons.append("过去四天持续晴朗，潜在花粉释放量只作轻微折减，不替代实测预报")
         score += max(-12, min(12, weather_score))
 
     if social:

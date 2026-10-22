@@ -208,6 +208,46 @@ class SmartControlTests(unittest.TestCase):
         self.assertGreater(smart.assess(config, dry, now)["score"], smart.assess(config, wet, now)["score"])
         self.assertGreaterEqual(smart.assess(config, wet, now)["score"], 0)
 
+    def test_rain_to_sun_and_past_sunny_streak_are_distinct_bounded_signals(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({})
+        current = {"temperature_2m": 15, "precipitation": 0, "cloud_cover": 80}
+        times = ["2026-03-28", "2026-03-29", "2026-03-30", "2026-03-31", "2026-04-01",
+                 "2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05"]
+        rain_then_sun = {"current": current, "daily": {"time": times,
+            "sunshine_duration_s": [0, 0, 0, 0, 25200, 36000, 36000, 36000, 36000],
+            "precipitation_sum_mm": [0, 0, 0, 12, 0, 0, 0, 0, 0]}}
+        no_recent_rain = {"current": current, "daily": {"time": times,
+            "sunshine_duration_s": [0, 0, 0, 0, 25200, 36000, 36000, 36000, 36000],
+            "precipitation_sum_mm": [0] * 9}}
+        wet_clear = smart.assess(config, rain_then_sun, now)
+        clear_only = smart.assess(config, no_recent_rain, now)
+        self.assertEqual(wet_clear["score"], clear_only["score"] + 3)
+
+        past_streak = {"current": current, "daily": {"time": times,
+            "sunshine_duration_s": [36000] * 9, "precipitation_sum_mm": [0] * 9}}
+        future_only = {"current": current, "daily": {"time": times,
+            "sunshine_duration_s": [0, 0, 0, 0, 36000, 36000, 36000, 36000, 36000],
+            "precipitation_sum_mm": [0] * 9}}
+        self.assertEqual(smart.assess(config, past_streak, now)["score"],
+                         smart.assess(config, future_only, now)["score"] - 3)
+
+    def test_weather_fetch_requests_and_preserves_four_days_of_daily_history(self):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def read(self):
+                return json.dumps({"current": {}, "hourly": {}, "daily": {
+                    "time": [f"2026-03-{day:02d}" for day in range(28, 32)] + [f"2026-04-0{day}" for day in range(1, 6)],
+                    "precipitation_sum": [0] * 9, "sunshine_duration": [36000] * 9}}).encode()
+        config = smart.default_config(); config.update(latitude=1.3, longitude=103.8)
+        with patch.object(server.urllib.request, "urlopen", return_value=Response()) as request:
+            result = server.fetch_smart_weather(config)
+        self.assertEqual(len(result["daily"]["time"]), 9)
+        self.assertEqual(len(result["daily"]["precipitation_sum_mm"]), 9)
+        query = server.urllib.parse.parse_qs(server.urllib.parse.urlsplit(request.call_args.args[0].full_url).query)
+        self.assertEqual(query["past_days"], ["4"])
+
     def test_official_peak_preboosts_one_tier_within_configured_window(self):
         config = smart.normalize_config({"official_level": 1, "official_peak_at": "2026-04-01T12:30",
                                          "preboost_minutes": 45})

@@ -359,7 +359,7 @@ def fetch_smart_weather(config: dict) -> dict:
         "latitude": config["latitude"], "longitude": config["longitude"],
         "current": "temperature_2m,precipitation,cloud_cover,wind_speed_10m",
         "hourly": "temperature_2m,precipitation_probability,cloud_cover,wind_speed_10m",
-        "daily": "precipitation_sum,sunshine_duration", "forecast_days": 4,
+        "daily": "precipitation_sum,sunshine_duration", "past_days": 4, "forecast_days": 4,
         "timezone": config.get("timezone", "Asia/Shanghai"),
     })
     request = urllib.request.Request(
@@ -380,9 +380,9 @@ def fetch_smart_weather(config: dict) -> dict:
                    "precipitation_probability": hourly.get("precipitation_probability", [])[:72],
                    "cloud_cover": hourly.get("cloud_cover", [])[:72],
                    "wind_speed_10m": hourly.get("wind_speed_10m", [])[:72]},
-        "daily": {"time": daily.get("time", [])[:4],
-                  "precipitation_sum_mm": daily.get("precipitation_sum", [])[:4],
-                  "sunshine_duration_s": daily.get("sunshine_duration", [])[:4]},
+        "daily": {"time": daily.get("time", [])[:9],
+                  "precipitation_sum_mm": daily.get("precipitation_sum", [])[:9],
+                  "sunshine_duration_s": daily.get("sunshine_duration", [])[:9]},
         "timezone": body.get("timezone", config.get("timezone")),
         "fetched_at_ms": int(time.time() * 1000),
         "attribution": "Open-Meteo weather forecast; not a Cupressaceae pollen forecast",

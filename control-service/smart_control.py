@@ -278,6 +278,7 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         temp = _finite_number(current.get("temperature_2m"))
         humidity = _finite_number(current.get("relative_humidity_2m"))
         rain = _finite_number(current.get("precipitation"))
+        rain_interval_s = _finite_number(current.get("interval"))
         cloud = _finite_number(current.get("cloud_cover"))
         if temp is not None and 5 <= temp <= 22:
             weather_score += 6
@@ -288,10 +289,24 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         elif humidity is not None and humidity >= 70:
             weather_score -= 2
             reasons.append(f"相对湿度 {humidity:g}% 偏高，空气中花粉倾向轻微下调")
-        if rain is not None and rain >= 0.2:
-            weather_score -= 12
-            reasons.append("当前有降水，短时空气花粉倾向下调")
-        elif rain is not None and cloud is not None and cloud < 35:
+        # Open-Meteo's current precipitation is a backward-looking sum whose
+        # duration is returned as `current.interval` (often 15 minutes). Use
+        # a normalized intensity proxy so different accumulation windows are
+        # not compared as if they had the same duration. Unknown intervals are
+        # not scored rather than guessed.
+        rain_rate = (rain * 3600 / rain_interval_s
+                     if rain is not None and rain_interval_s is not None
+                     and 0 < rain_interval_s <= 7200 else None)
+        if rain_rate is not None and rain_rate >= 3:
+            weather_score -= 10
+            reasons.append(f"近 {rain_interval_s / 60:g} 分钟降水 {rain:g} mm（折算雨强 {rain_rate:g} mm/h），短时花粉倾向明显下调（弱天气信号）")
+        elif rain_rate is not None and rain_rate >= 1:
+            weather_score -= 6
+            reasons.append(f"近 {rain_interval_s / 60:g} 分钟降水 {rain:g} mm（折算雨强 {rain_rate:g} mm/h），短时花粉倾向中度下调（弱天气信号）")
+        elif rain_rate is not None and rain_rate >= 0.2:
+            weather_score -= 2
+            reasons.append(f"近 {rain_interval_s / 60:g} 分钟有少量降水（折算雨强 {rain_rate:g} mm/h），只作轻微下调")
+        elif rain_rate is not None and cloud is not None and cloud < 35:
             weather_score += 5
             reasons.append("当前少云/晴朗，轻微上调释放与扩散可能性")
         # Rain/sunshine effects are bounded and never replace direct pollen evidence.

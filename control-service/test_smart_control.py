@@ -410,12 +410,41 @@ class SmartControlTests(unittest.TestCase):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
         config = smart.normalize_config({"official_level": 2, "official_updated_at": int(now.timestamp() * 1000)})
         fetched_at_ms = int(now.timestamp() * 1000)
-        dry = {"current": {"temperature_2m": 15, "precipitation": 0, "cloud_cover": 10},
+        dry = {"current": {"temperature_2m": 15, "precipitation": 0, "interval": 900, "cloud_cover": 10},
                "fetched_at_ms": fetched_at_ms}
-        wet = {"current": {"temperature_2m": 15, "precipitation": 2, "cloud_cover": 90},
+        wet = {"current": {"temperature_2m": 15, "precipitation": 2, "interval": 900, "cloud_cover": 90},
                "fetched_at_ms": fetched_at_ms}
         self.assertGreater(smart.assess(config, dry, now)["score"], smart.assess(config, wet, now)["score"])
         self.assertGreaterEqual(smart.assess(config, wet, now)["score"], 0)
+
+    def test_current_rain_suppression_scales_with_intensity(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        fetched_at_ms = int(now.timestamp() * 1000)
+        config = smart.normalize_config({"official_level": 2, "official_updated_at": fetched_at_ms})
+
+        def score_for_rain(mm):
+            weather = {"fetched_at_ms": fetched_at_ms, "current": {
+                "temperature_2m": 15, "precipitation": mm, "interval": 900, "cloud_cover": 80}}
+            return smart.assess(config, weather, now)
+
+        dry = score_for_rain(0)
+        drizzle = score_for_rain(0.01)
+        light_rain = score_for_rain(0.1)
+        steady_rain = score_for_rain(0.5)
+        heavy_rain = score_for_rain(1)
+
+        # Tiny rolling accumulations should not be mistaken for a wash-off.
+        self.assertEqual(drizzle["score"], dry["score"])
+        self.assertEqual(dry["score"] - light_rain["score"], 2)
+        self.assertEqual(dry["score"] - steady_rain["score"], 6)
+        self.assertEqual(dry["score"] - heavy_rain["score"], 10)
+        self.assertTrue(any("少量降水" in reason for reason in light_rain["reasons"]))
+        self.assertTrue(any("明显下调" in reason for reason in heavy_rain["reasons"]))
+
+        # A precipitation amount without its averaging interval is ambiguous.
+        missing_interval = {"fetched_at_ms": fetched_at_ms, "current": {
+            "temperature_2m": 15, "precipitation": 5, "cloud_cover": 80}}
+        self.assertEqual(smart.assess(config, missing_interval, now)["score"], dry["score"])
 
     def test_wind_speed_alone_is_not_used_as_a_positive_pollen_proxy(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -499,7 +528,8 @@ class SmartControlTests(unittest.TestCase):
     def test_stale_missing_or_future_weather_timestamp_is_ignored(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
         config = smart.normalize_config({"official_level": 2, "official_updated_at": int(now.timestamp() * 1000)})
-        current_rain = {"current": {"temperature_2m": 15, "precipitation": 10, "cloud_cover": 90}}
+        current_rain = {"current": {"temperature_2m": 15, "precipitation": 10,
+                                     "interval": 900, "cloud_cover": 90}}
         fresh = dict(current_rain, fetched_at_ms=int(now.timestamp() * 1000))
         stale = dict(current_rain, fetched_at_ms=int((now.timestamp() - 61 * 60) * 1000))
         future = dict(current_rain, fetched_at_ms=int((now.timestamp() + 6 * 60) * 1000))

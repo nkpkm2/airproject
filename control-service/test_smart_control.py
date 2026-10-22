@@ -394,6 +394,19 @@ class SmartControlTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 server.validate_official_pollen_url(url)
 
+    def test_official_page_decoder_supports_meta_declared_gbk_when_header_is_missing_or_wrong(self):
+        html = ('<meta charset="gb2312"><p>发布时间：2026年4月1日</p>'
+                '<p>柏科花粉浓度高，侧柏进入高峰</p>')
+        raw = html.encode("gbk")
+        for declared in (None, "utf-8"):
+            with self.subTest(declared_charset=declared):
+                decoded = server.decode_official_html(raw, declared)
+                self.assertIn("柏科花粉浓度高", decoded)
+                self.assertIn("侧柏进入高峰", decoded)
+                parsed = smart.parse_official_pollen_page(
+                    decoded, datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai")))
+                self.assertEqual(parsed["level"], 3)
+
     def test_official_page_fetch_reads_bounded_html_and_records_source(self):
         class Headers:
             def get_content_type(self): return "text/html"

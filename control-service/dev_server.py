@@ -507,6 +507,31 @@ class _GovOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
         validate_official_pollen_url(newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
+def decode_official_html(raw: bytes, declared_charset: str | None = None) -> str:
+    """Decode Chinese government HTML with bounded, declaration-aware fallbacks."""
+    if raw.startswith(b"\xef\xbb\xbf"):
+        candidates = ["utf-8-sig"]
+    elif raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        candidates = ["utf-16"]
+    else:
+        candidates = []
+    if declared_charset:
+        candidates.append(declared_charset.strip())
+    meta = re.search(rb"charset\s*=\s*[\"']?\s*([a-zA-Z0-9._-]+)", raw[:8192], re.I)
+    if meta:
+        candidates.append(meta.group(1).decode("ascii", errors="ignore"))
+    candidates.extend(("utf-8", "gb18030"))
+    tried = set()
+    for encoding in candidates:
+        key = encoding.lower()
+        if not key or key in tried: continue
+        tried.add(key)
+        try:
+            return raw.decode(encoding, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
 def fetch_official_pollen(config: dict) -> dict:
     """Read a small, fresh explicit Cupressaceae forecast from a government page."""
     source_url = validate_official_pollen_url(config.get("official_url", ""))
@@ -526,8 +551,8 @@ def fetch_official_pollen(config: dict) -> dict:
         raw = response.read(500_001)
         if len(raw) > 500_000:
             raise ValueError("官方预报网页超过 500 KB 安全上限")
-        charset = response.headers.get_content_charset() or "utf-8"
-    page = raw.decode(charset, errors="replace")
+        charset = response.headers.get_content_charset()
+    page = decode_official_html(raw, charset)
     result = smart_control.parse_official_pollen_page(
         page, datetime.now(smart_control.resolve_timezone(config.get("timezone", "Asia/Shanghai"))))
     result.update({"fetched_at_ms": int(time.time() * 1000), "source_url": source_url})

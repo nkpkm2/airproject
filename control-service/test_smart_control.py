@@ -207,13 +207,13 @@ class SmartControlTests(unittest.TestCase):
             official_style, datetime(2026, 3, 17, 8, tzinfo=ZoneInfo("Asia/Shanghai")))
         self.assertEqual(parsed_peak["level"], 3)
         self.assertEqual(parsed_peak["predicted_peak_at"], "2026-03-17T10:00:00+08:00")
-        self.assertEqual(parsed_peak["predicted_peak_until"], "2026-03-21T10:00:00+08:00")
+        self.assertEqual(parsed_peak["predicted_peak_until"], "2026-03-21T23:59:59+08:00")
 
         ongoing_window = official_style.replace("2026-03-17", "2026-03-19")
         parsed_ongoing = smart.parse_official_pollen_page(
             ongoing_window, datetime(2026, 3, 20, 8, tzinfo=ZoneInfo("Asia/Shanghai")))
         self.assertEqual(parsed_ongoing["predicted_peak_at"], "2026-03-17T10:00:00+08:00")
-        self.assertEqual(parsed_ongoing["predicted_peak_until"], "2026-03-21T10:00:00+08:00")
+        self.assertEqual(parsed_ongoing["predicted_peak_until"], "2026-03-21T23:59:59+08:00")
 
         official_page_excerpt = (
             "<p>日期：2026-03-17 16:07 来源：北京市疾病预防控制中心</p>"
@@ -224,7 +224,28 @@ class SmartControlTests(unittest.TestCase):
             official_page_excerpt, datetime(2026, 3, 17, 17, tzinfo=ZoneInfo("Asia/Shanghai")))
         self.assertEqual(parsed_real_wording["level"], 3)
         self.assertEqual(parsed_real_wording["predicted_peak_at"], "2026-03-17T10:00:00+08:00")
-        self.assertEqual(parsed_real_wording["predicted_peak_until"], "2026-03-21T10:00:00+08:00")
+        self.assertEqual(parsed_real_wording["predicted_peak_until"], "2026-03-21T23:59:59+08:00")
+
+    def test_official_peak_window_keeps_recent_multiday_forecast_valid_through_its_end(self):
+        config = smart.normalize_config({})
+        published = datetime(2026, 3, 17, 16, 7, tzinfo=ZoneInfo("Asia/Shanghai"))
+        now = datetime(2026, 3, 20, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        signal = {
+            "level": 3,
+            "published_at_ms": int(published.timestamp() * 1000),
+            "fetched_at_ms": int(now.timestamp() * 1000),
+            "predicted_peak_at": "2026-03-17T10:00:00+08:00",
+            "predicted_peak_until": "2026-03-21T23:59:59+08:00",
+        }
+        active = smart.assess(config, None, now, official_signal=signal)
+        self.assertEqual(active["score"], 52)
+        self.assertEqual(active["sources"]["official_pollen"], "verified_gov_cn_page")
+
+        # A fetched page stays useful during the stated peak, not indefinitely.
+        after_grace = datetime(2026, 3, 23, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        expired = smart.assess(config, None, after_grace, official_signal=signal)
+        self.assertEqual(expired["score"], 0)
+        self.assertNotEqual(expired["sources"]["official_pollen"], "verified_gov_cn_page")
 
     def test_annual_pollen_season_handles_calendar_year_rollover(self):
         config = smart.normalize_config({"season_start_md": "11-15", "season_end_md": "02-15"})

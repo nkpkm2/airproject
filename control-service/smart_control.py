@@ -252,6 +252,21 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     if official_signal:
         fetched_age = fresh_age_seconds(official_signal.get("fetched_at_ms"), 2 * 3600)
         published_age = fresh_age_seconds(official_signal.get("published_at_ms"), 48 * 3600)
+        peak_window_active = False
+        peak_until = official_signal.get("predicted_peak_until")
+        if isinstance(peak_until, str) and peak_until:
+            try:
+                peak_until_at = datetime.fromisoformat(peak_until)
+                if peak_until_at.tzinfo is None:
+                    peak_until_at = peak_until_at.replace(tzinfo=now_local.tzinfo)
+                peak_window_active = now_local <= peak_until_at + timedelta(hours=12)
+            except (TypeError, ValueError, OverflowError):
+                peak_window_active = False
+        if published_age is None and peak_window_active:
+            # A fresh fetch of a recent article remains usable through its
+            # explicitly predicted multi-day peak window, but never beyond a
+            # seven-day publication-age ceiling or twelve-hour post-window grace.
+            published_age = fresh_age_seconds(official_signal.get("published_at_ms"), 7 * 24 * 3600)
         try: candidate = int(official_signal.get("level", 0))
         except (TypeError, ValueError): candidate = 0
         if fetched_age is not None and published_age is not None and 1 <= candidate <= 4:
@@ -554,8 +569,10 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
                 # in the past so their peak can still be shown to the operator.
                 if end_day < published.date(): continue
                 peak_at = datetime(year, month, day, 10, 0, tzinfo=published.tzinfo).isoformat()
+                # The forecast window covers the full final calendar day;
+                # 10:00 is only the estimated first-day preboost reference.
                 peak_until = datetime(end_day.year, end_day.month, end_day.day,
-                                      10, 0, tzinfo=published.tzinfo).isoformat()
+                                      23, 59, 59, tzinfo=published.tzinfo).isoformat()
                 break
             except (TypeError, ValueError):
                 continue

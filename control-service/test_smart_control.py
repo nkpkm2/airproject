@@ -257,9 +257,9 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(query["past_days"], ["4"])
 
     def test_official_peak_preboosts_one_tier_within_configured_window(self):
-        config = smart.normalize_config({"official_level": 1, "official_peak_at": "2026-04-01T12:30",
-                                         "preboost_minutes": 45})
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({"official_level": 1, "official_peak_at": "2026-04-01T12:30",
+                                         "official_updated_at": int(now.timestamp() * 1000), "preboost_minutes": 45})
         result = smart.assess(config, None, now)
         self.assertEqual(result["tier"], "weak")
         self.assertEqual(result["forecast_tier_6h"], "normal")
@@ -272,7 +272,22 @@ class SmartControlTests(unittest.TestCase):
                                          "official_updated_at": old_ms, "social_updated_at": old_ms})
         risk = smart.assess(config, None, now)
         self.assertEqual(risk["tier"], "weak")
-        self.assertTrue(any("已自动过期" in reason for reason in risk["reasons"]))
+        self.assertTrue(any("缺少有效时间戳" in reason or "超过 48 小时" in reason for reason in risk["reasons"]))
+
+    def test_manual_signals_without_valid_timestamps_are_not_reused_forever(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        missing = smart.normalize_config({"official_level": 4, "social_level": 3})
+        risk = smart.assess(missing, None, now)
+        self.assertEqual(risk["tier"], "weak")
+        self.assertTrue(any("缺少有效时间戳" in reason for reason in risk["reasons"]))
+        future = int((now.timestamp() + 600) * 1000)
+        invalid_future = smart.normalize_config({"official_level": 4, "social_level": 3,
+            "official_updated_at": future, "social_updated_at": future})
+        risk = smart.assess(invalid_future, None, now)
+        self.assertEqual(risk["tier"], "weak")
+        valid = smart.normalize_config({"official_level": 4, "social_level": 3,
+            "official_updated_at": int(now.timestamp() * 1000), "social_updated_at": int(now.timestamp() * 1000)})
+        self.assertEqual(smart.assess(valid, None, now)["tier"], "extreme")
 
     def test_target_policy_has_explicit_non_auto_speed_cap(self):
         self.assertEqual(smart.target_mode("low", "weak", "extra"), "low")

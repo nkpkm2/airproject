@@ -152,35 +152,35 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     now_local = _local_now(config, now)
     official = int(config.get("official_level", 0))
     official_source = "operator_entry"
-    if official_signal:
-        try:
-            fetched_age = now_local.timestamp() - float(official_signal.get("fetched_at_ms", 0)) / 1000
-            published_age = now_local.timestamp() - float(official_signal.get("published_at_ms", 0)) / 1000
-            candidate = int(official_signal.get("level", 0))
-            if 0 <= fetched_age <= 2 * 3600 and 0 <= published_age <= 48 * 3600 and 1 <= candidate <= 4:
-                official = candidate
-                official_source = "verified_gov_cn_page"
-        except (TypeError, ValueError):
-            pass
     social = int(config.get("social_level", 0))
     official_time = config.get("official_updated_at")
     social_time = config.get("social_updated_at")
-    if official and official_time:
+    reasons: list[str] = []
+
+    def fresh_age_seconds(value: Any, limit_s: float) -> float | None:
         try:
-            if now_local.timestamp() - float(official_time) / 1000 > 48 * 3600:
-                official = 0
-                reasons = ["官方柏科花粉信号超过 48 小时，已自动过期"]
-            else: reasons = []
-        except (TypeError, ValueError): reasons = []
-    else: reasons = []
-    if official_signal and official_source != "verified_gov_cn_page":
-        reasons.append("自动读取的官方预报超过控制有效期或时间异常，未参与控制")
-    if social and social_time:
-        try:
-            if now_local.timestamp() - float(social_time) / 1000 > 12 * 3600:
-                social = 0
-                reasons.append("社交/过敏讨论信号超过 12 小时，已自动过期")
-        except (TypeError, ValueError): pass
+            age = now_local.timestamp() - float(value) / 1000
+            return max(0.0, age) if -300 <= age <= limit_s else None
+        except (TypeError, ValueError):
+            return None
+
+    if official and official_source == "operator_entry" and fresh_age_seconds(official_time, 48 * 3600) is None:
+        official = 0
+        reasons.append("人工录入的柏科预报缺少有效时间戳、已超过 48 小时或时间异常，已忽略")
+    if social and fresh_age_seconds(social_time, 12 * 3600) is None:
+        social = 0
+        reasons.append("社交/过敏讨论信号缺少有效时间戳、已超过 12 小时或时间异常，已忽略")
+
+    if official_signal:
+        fetched_age = fresh_age_seconds(official_signal.get("fetched_at_ms"), 2 * 3600)
+        published_age = fresh_age_seconds(official_signal.get("published_at_ms"), 48 * 3600)
+        try: candidate = int(official_signal.get("level", 0))
+        except (TypeError, ValueError): candidate = 0
+        if fetched_age is not None and published_age is not None and 1 <= candidate <= 4:
+            official = candidate
+            official_source = "verified_gov_cn_page"
+        else:
+            reasons.append("自动读取的官方预报超过控制有效期或时间异常，未参与控制")
     score = (0.0, 12.0, 30.0, 52.0, 72.0)[official]
     season_start, season_end = config.get("season_start_md", ""), config.get("season_end_md", "")
     if season_start and season_end:

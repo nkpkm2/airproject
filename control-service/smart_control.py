@@ -249,19 +249,32 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             weather = None
             reasons.append("天气数据地点/时区与当前设置不一致，已忽略并等待重新抓取")
 
+    official_signal_valid = False
+    official_forecast_level = 0
+    official_forecast_peak_at = None
     if official_signal:
         fetched_age = fresh_age_seconds(official_signal.get("fetched_at_ms"), 2 * 3600)
         published_age = fresh_age_seconds(official_signal.get("published_at_ms"), 48 * 3600)
         peak_window_active = False
+        peak_window_expired = False
+        peak_start_at = None
         peak_until = official_signal.get("predicted_peak_until")
-        if isinstance(peak_until, str) and peak_until:
+        peak_start = official_signal.get("predicted_peak_at")
+        if isinstance(peak_start, str) and peak_start:
             try:
-                peak_until_at = datetime.fromisoformat(peak_until)
+                peak_start_at = datetime.fromisoformat(peak_start)
+                if peak_start_at.tzinfo is None:
+                    peak_start_at = peak_start_at.replace(tzinfo=now_local.tzinfo)
+                peak_until_at = (datetime.fromisoformat(peak_until)
+                                 if isinstance(peak_until, str) and peak_until
+                                 else peak_start_at + timedelta(hours=24))
                 if peak_until_at.tzinfo is None:
                     peak_until_at = peak_until_at.replace(tzinfo=now_local.tzinfo)
                 peak_window_active = now_local <= peak_until_at + timedelta(hours=12)
+                peak_window_expired = not peak_window_active
             except (TypeError, ValueError, OverflowError):
                 peak_window_active = False
+                peak_start_at = None
         if published_age is None and peak_window_active:
             # A fresh fetch of a recent article remains usable through its
             # explicitly predicted multi-day peak window, but never beyond a
@@ -269,11 +282,24 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             published_age = fresh_age_seconds(official_signal.get("published_at_ms"), 7 * 24 * 3600)
         try: candidate = int(official_signal.get("level", 0))
         except (TypeError, ValueError): candidate = 0
-        if fetched_age is not None and published_age is not None and 1 <= candidate <= 4:
-            official = candidate
-            official_source = "verified_gov_cn_page"
+        if (fetched_age is not None and published_age is not None and 1 <= candidate <= 4
+                and not peak_window_expired):
+            official_signal_valid = True
+            if peak_start_at is not None and now_local < peak_start_at:
+                official_forecast_level = candidate
+                official_forecast_peak_at = peak_start_at.isoformat()
+                if official == 0:
+                    official_source = "verified_gov_cn_page_forecast"
+                reasons.append(
+                    f"官方柏科预报等级 {candidate}/4 对应未来峰值时段，预计始于 {peak_start_at.isoformat()}；"
+                    "到达预升档窗口前不把它当作当前浓度"
+                )
+            else:
+                official = max(official, candidate)
+                official_source = "verified_gov_cn_page"
         else:
-            reasons.append("自动读取的官方预报超过控制有效期或时间异常，未参与控制")
+            reason = "官方柏科高峰窗口已结束" if peak_window_expired else "自动读取的官方预报超过控制有效期或时间异常"
+            reasons.append(f"{reason}，未参与控制")
     score = (0.0, 12.0, 30.0, 52.0, 72.0)[official]
     season_start, season_end = config.get("season_start_md", ""), config.get("season_end_md", "")
     in_season = False
@@ -287,10 +313,12 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             reasons.append("处于本地配置的柏科花粉季节；季节信息只作观察提示")
     if official:
         reasons.append(f"本地官方/人工柏科花粉级别 {official}/4（主信号）")
+    elif official_forecast_level:
+        reasons.append(f"未来官方柏科花粉预报等级 {official_forecast_level}/4（尚未按当前浓度计分）")
     else:
         reasons.append("尚未录入当地柏科花粉预报；季节和天气不能单独证明空气中花粉浓度")
 
-    weather_context_active = in_season or official > 0 or social > 0
+    weather_context_active = in_season or official > 0 or official_forecast_level > 0 or social > 0
     weather_score = 0.0
     if weather and not weather_context_active:
         reasons.append("天气背景未计入花粉风险：尚无当地花粉季、有效柏科预报或有效人工趋势信号")
@@ -451,13 +479,14 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             )
     preboost = False
     peak_at = ((official_signal.get("predicted_peak_at") if official_signal else None)
-               if official_source == "verified_gov_cn_page" else None) or config.get("official_peak_at")
+               if official_signal_valid else None) or config.get("official_peak_at")
     if peak_at:
         try:
             forecast_peak = datetime.fromisoformat(peak_at)
             if forecast_peak.tzinfo is None: forecast_peak = forecast_peak.replace(tzinfo=now_local.tzinfo)
             minutes_until_peak = (forecast_peak - now_local).total_seconds() / 60
-            preboost = 0 < minutes_until_peak <= int(config.get("preboost_minutes", 45)) and official >= 1
+            preboost_level = max(official, official_forecast_level)
+            preboost = 0 < minutes_until_peak <= int(config.get("preboost_minutes", 45)) and preboost_level >= 1
         except ValueError: preboost = False
     score = round(max(0, min(100, score)), 1)
     forecast_score = round(max(score, min(100, forecast_score)), 1)
@@ -484,6 +513,8 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             "forecast_weather_adjustment": forecast_weather_adjustment,
             "forecast_components": forecast_components,
             "weather_context_active": weather_context_active,
+            "official_forecast_level": official_forecast_level,
+            "official_forecast_peak_at": official_forecast_peak_at,
             "reasons": reasons, "evening_boost": evening,
             "tier_before_evening": tier_before_evening, "preboost_active": preboost,
             "residual_active": residual_active, "residual_remaining_hours": round(residual_remaining_h, 2),

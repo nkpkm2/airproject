@@ -329,7 +329,35 @@ class SmartControlTests(unittest.TestCase):
                   "predicted_peak_at": (now + smart.timedelta(minutes=30)).isoformat()}
         result = smart.assess(config, None, now, official_signal=signal)
         self.assertTrue(result["preboost_active"])
-        self.assertEqual(result["forecast_tier_6h"], "extreme")
+        self.assertEqual(result["score"], 0)
+        self.assertEqual(result["forecast_tier_6h"], "normal")
+
+    def test_future_high_official_peak_is_not_treated_as_current_until_preboost_or_peak(self):
+        peak_at = datetime(2026, 4, 4, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({"preboost_minutes": 45})
+        published = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+        def signal_for(now):
+            return {"level": 4, "published_at_ms": int(published.timestamp() * 1000),
+                    "fetched_at_ms": int(now.timestamp() * 1000),
+                    "predicted_peak_at": peak_at.isoformat(),
+                    "predicted_peak_until": (peak_at + smart.timedelta(days=1)).isoformat()}
+
+        days_ahead = smart.assess(config, None, published, official_signal=signal_for(published))
+        self.assertEqual(days_ahead["score"], 0)
+        self.assertEqual(days_ahead["tier"], "weak")
+        self.assertEqual(days_ahead["official_forecast_level"], 4)
+        self.assertFalse(days_ahead["preboost_active"])
+
+        before_peak = peak_at - smart.timedelta(minutes=30)
+        preboost = smart.assess(config, None, before_peak, official_signal=signal_for(before_peak))
+        self.assertTrue(preboost["preboost_active"])
+        self.assertEqual(preboost["score"], 0)
+        self.assertEqual(preboost["forecast_tier_6h"], "normal")
+
+        during_peak = smart.assess(config, None, peak_at, official_signal=signal_for(peak_at))
+        self.assertEqual(during_peak["score"], 72)
+        self.assertEqual(during_peak["tier"], "extreme")
 
     def test_evening_boost_includes_exact_start_and_excludes_exact_end(self):
         config = smart.normalize_config({"evening_start": "17:10", "evening_minutes": 40})

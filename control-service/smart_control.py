@@ -7,6 +7,7 @@ available global pollen API does not cover this pollen family in China.
 from __future__ import annotations
 
 from datetime import date, datetime, time as daytime, timedelta, timezone
+import calendar
 import math
 import re
 from html import unescape
@@ -696,6 +697,7 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
     else: raise ValueError("公告提到柏科但没有可判读的浓度级别/高峰信息")
     peak_at = None
     peak_until = None
+    approximate_peak_window = False
     date_pattern = re.compile(
         r"(?:(20\d{2})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]"
         r"(?:\s*(?:至|到|[-~～])\s*(?:(20\d{2})\s*年\s*)?(?:(\d{1,2})\s*月\s*)?(\d{1,2})\s*[日号])?"
@@ -736,9 +738,61 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
             except (TypeError, ValueError):
                 continue
         if peak_at: break
+    if peak_at is None:
+        # Official phenology notices often forecast a broad span such as
+        # “3月中下旬至4月上旬”, not an exact day. Preserve that uncertainty
+        # as a date window instead of silently losing the advance forecast.
+        period_pattern = re.compile(
+            r"(?:(20\d{2})\s*年\s*)?(\d{1,2})\s*月\s*(中下旬|上中旬|上旬|中旬|下旬)"
+            r"(?:\s*(?:至|到|[-~～])\s*(?:(20\d{2})\s*年\s*)?"
+            r"(?:(\d{1,2})\s*月\s*)?(中下旬|上中旬|上旬|中旬|下旬))?"
+        )
+        def period_bounds(year: int, month: int, label: str) -> tuple[date, date]:
+            last = calendar.monthrange(year, month)[1]
+            ranges = {"上旬": (1, 10), "中旬": (11, 20), "下旬": (21, last),
+                      "上中旬": (1, 20), "中下旬": (11, last)}
+            first_day, last_day = ranges[label]
+            return date(year, month, first_day), date(year, month, last_day)
+        for peak_match in re.finditer(r"高峰(?:日|期)?|达峰|峰值", text):
+            window_start = max(0, peak_match.start() - 180)
+            window = text[window_start:min(len(text), peak_match.end() + 100)]
+            if not pollen_terms.search(window): continue
+            periods = list(period_pattern.finditer(window))
+            periods.sort(key=lambda item: abs(window_start + item.start() - peak_match.start()))
+            for period in periods:
+                first_year, first_month, first_label, second_year, second_month, second_label = period.groups()
+                try:
+                    year = int(first_year or published.year)
+                    month = int(first_month)
+                    start_day, _ = period_bounds(year, month, first_label)
+                    end_year = int(second_year or year) if second_label else year
+                    end_month = int(second_month or month) if second_label else month
+                    end_label = second_label or first_label
+                    if second_label and not second_year and end_month < month:
+                        end_year += 1
+                    _, end_day = period_bounds(end_year, end_month, end_label)
+                    # A freshly published annual phenology note late in the
+                    # year may refer to the coming spring, even if it omits
+                    # the year. Resolve only an unambiguous >180-day rollover.
+                    if not first_year and end_day < published.date() and (published.date() - end_day).days > 180:
+                        start_day, _ = period_bounds(year + 1, month, first_label)
+                        if not second_year:
+                            end_year += 1
+                        _, end_day = period_bounds(end_year, end_month, end_label)
+                    if end_day < published.date(): continue
+                    peak_at = datetime(start_day.year, start_day.month, start_day.day,
+                                       10, 0, tzinfo=published.tzinfo).isoformat()
+                    peak_until = datetime(end_day.year, end_day.month, end_day.day,
+                                          23, 59, 59, tzinfo=published.tzinfo).isoformat()
+                    approximate_peak_window = True
+                    break
+                except (TypeError, ValueError, OverflowError):
+                    continue
+            if peak_at: break
     return {"level": level, "published_at_ms": int(published.timestamp() * 1000),
             "predicted_peak_at": peak_at, "predicted_peak_until": peak_until,
-            "peak_time_precision": "date_window_10_local" if peak_at else None,
+            "peak_time_precision": ("approximate_month_decade_10_local" if approximate_peak_window
+                                    else "date_window_10_local" if peak_at else None),
             "evidence": context[:600], "age_days": round(age_days, 2)}
 
 

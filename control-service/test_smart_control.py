@@ -21,8 +21,8 @@ class SmartControlTests(unittest.TestCase):
         script = (console / "fleet.js").read_text(encoding="utf-8")
         self.assertIn('id="official-signal-refresh"', page)
         self.assertIn('id="social-signal-refresh"', page)
-        self.assertIn("fleet.css?v=20261022-smart9", page)
-        self.assertIn("fleet.js?v=20261022-smart9", page)
+        self.assertIn("fleet.css?v=20261022-smart10", page)
+        self.assertIn("fleet.js?v=20261022-smart10", page)
         self.assertIn("saveSmart($('smart-enabled').checked,'official')", script)
         self.assertIn("saveSmart($('smart-enabled').checked,'social')", script)
 
@@ -361,6 +361,19 @@ class SmartControlTests(unittest.TestCase):
         parsed_not_yet_peak = smart.parse_official_pollen_page(not_yet_peak, now)
         self.assertEqual(parsed_not_yet_peak["level"], 2)
         self.assertEqual(parsed_not_yet_peak["predicted_peak_at"], "2026-04-05T10:00:00+08:00")
+
+        # The official local phenology notices can describe only旬-level
+        # windows (“3月中下旬至4月上旬”), so retain a clearly approximate range.
+        phenology_excerpt = (
+            "<p>日期：2026-03-12 17:22 来源：房山区人民政府</p>"
+            "<p>柏科花粉浓度将逐渐升高，预计3月中下旬至4月上旬达飘散高峰。</p>"
+        )
+        parsed_phenology = smart.parse_official_pollen_page(
+            phenology_excerpt, datetime(2026, 3, 12, 18, tzinfo=ZoneInfo("Asia/Shanghai")))
+        self.assertEqual(parsed_phenology["level"], 3)
+        self.assertEqual(parsed_phenology["predicted_peak_at"], "2026-03-11T10:00:00+08:00")
+        self.assertEqual(parsed_phenology["predicted_peak_until"], "2026-04-10T23:59:59+08:00")
+        self.assertEqual(parsed_phenology["peak_time_precision"], "approximate_month_decade_10_local")
 
     def test_official_peak_window_keeps_recent_multiday_forecast_valid_through_its_end(self):
         config = smart.normalize_config({})

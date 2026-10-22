@@ -15,6 +15,30 @@ from test_dev_server import server
 
 
 class SmartControlTests(unittest.TestCase):
+    def test_restart_recovery_drops_unpublished_queue_and_marks_inflight_pulse_uncertain(self):
+        runtime = {"device_actions": {"pur-test": {
+            "queue_command": "opto.mode.pulse", "queue_origin": "smart_control",
+            "inflight": {"expected": "medium", "sent_at_ms": 1234, "request_id": "req-1"}}}}
+        server.recover_smart_runtime_after_restart(runtime)
+        action = runtime["device_actions"]["pur-test"]
+        self.assertNotIn("queue_command", action)
+        self.assertNotIn("queue_origin", action)
+        self.assertTrue(action["inflight"]["restart_recovery"])
+        self.assertIn("重启后", action["status"])
+
+    def test_smart_runtime_checkpoint_persists_intent_but_not_ephemeral_queue_or_weather(self):
+        runtime = {"weather": {"current": {"temperature_2m": 15}},
+                   "device_actions": {"pur-test": {
+                       "queue_command": "opto.mode.pulse", "queue_origin": "smart_control",
+                       "inflight": {"expected": "medium", "sent_at_ms": 1234}}}}
+        with tempfile.TemporaryDirectory() as folder, patch.object(server, "SMART_RUNTIME", runtime), \
+                patch.object(server, "SMART_RUNTIME_PATH", Path(folder) / "runtime.json"):
+            server.save_smart_runtime()
+            saved = json.loads((Path(folder) / "runtime.json").read_text(encoding="utf-8"))
+        self.assertNotIn("weather", saved)
+        self.assertNotIn("queue_command", saved["device_actions"]["pur-test"])
+        self.assertIn("inflight", saved["device_actions"]["pur-test"])
+
     def test_smart_control_status_endpoint(self):
         httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         worker = Thread(target=httpd.serve_forever, daemon=True)

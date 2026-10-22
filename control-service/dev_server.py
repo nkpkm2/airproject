@@ -51,6 +51,14 @@ def save_smart_runtime() -> None:
     SMART_RUNTIME_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary = SMART_RUNTIME_PATH.with_suffix(".tmp")
     safe = {key: value for key, value in SMART_RUNTIME.items() if key != "weather"}
+    # Queue markers are process-local. Persist the in-flight intent before the
+    # MQTT publish, but never replay an unconsumed queue after a restart.
+    if isinstance(safe.get("device_actions"), dict):
+        safe["device_actions"] = {
+            device_id: {key: value for key, value in action.items()
+                        if key not in {"queue_command", "queue_origin"}}
+            for device_id, action in safe["device_actions"].items() if isinstance(action, dict)
+        }
     temporary.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(SMART_RUNTIME_PATH)
 
@@ -67,6 +75,21 @@ SMART_RUNTIME.setdefault("candidate_tier", "weak")
 SMART_RUNTIME.setdefault("candidate_since", 0)
 SMART_RUNTIME.setdefault("device_actions", {})
 SMART_RUNTIME.setdefault("last_error", "")
+
+def recover_smart_runtime_after_restart(runtime: dict) -> None:
+    """Fence off non-idempotent button pulses whose outcome may be ambiguous."""
+    actions = runtime.get("device_actions", {})
+    if not isinstance(actions, dict): return
+    for action in actions.values():
+        if not isinstance(action, dict): continue
+        action.pop("queue_command", None)
+        action.pop("queue_origin", None)
+        inflight = action.get("inflight")
+        if isinstance(inflight, dict):
+            inflight["restart_recovery"] = True
+            action["status"] = "服务重启后正在核对上次按键结果"
+
+recover_smart_runtime_after_restart(SMART_RUNTIME)
 
 def canonical_device_id(value: object) -> str:
     """Use one immutable identity for both raw-MAC serial and MQTT IDs."""
@@ -606,6 +629,25 @@ def smart_controller_loop() -> None:
                     current_mode = derived.get("mode", "unknown")
                     inflight = action_state.get("inflight")
                     if inflight:
+                        if inflight.get("restart_recovery"):
+                            sent_at_ms = int(inflight.get("sent_at_ms", now_ms))
+                            fresh_state = int(record.get("_state_seen_ms", 0)) > sent_at_ms
+                            expected_mode = inflight.get("expected")
+                            expected_seen = (expected_mode == current_mode or
+                                             (expected_mode == "active" and current_mode in smart_control.MODES))
+                            if state == "online" and fresh_state and expected_seen:
+                                action_state.update(inflight=None, last_success_at_ms=now_ms,
+                                                    failure_count=0, paused=False, error="",
+                                                    status="服务重启后已确认上次操作")
+                                inflight = None
+                            elif now_ms - sent_at_ms > 12_000:
+                                action_state.update(inflight=None, paused=True,
+                                                    status="重启期间按键结果不确定；请核对灯态后保存设置恢复",
+                                                    error="为避免重复按键，未自动重发结果不确定的控制命令")
+                                continue
+                            else:
+                                continue
+                    if inflight:
                         prior_command = command_for(record, str(inflight.get("request_id", ""))) if inflight.get("request_id") else None
                         if prior_command and prior_command.get("status") in {"failed", "timeout"}:
                             failures = int(action_state.get("failure_count", 0)) + 1
@@ -654,15 +696,15 @@ def smart_controller_loop() -> None:
                     # per iteration to keep MQTT and device keys from contending.
                     action_state["queue_command"] = command
                     action_state["queue_origin"] = "manual_target" if manual_target else "smart_control"
-            if now_s - last_save >= 30:
-                save_smart_runtime()
-                last_save = now_s
             queued = [(device_id, action.get("queue_command"), action.get("queue_origin", "smart_control"))
                       for device_id, action in SMART_RUNTIME.get("device_actions", {}).items() if action.get("queue_command")][:5]
             for device_id, _, _ in queued:
                 action = SMART_RUNTIME["device_actions"][device_id]
                 action.pop("queue_command", None)
                 action.pop("queue_origin", None)
+            if queued or now_s - last_save >= 30:
+                save_smart_runtime()
+                last_save = now_s
         for item in queued:
             device_id, command, origin = item
             ok, result = publish_control_command(device_id, command, origin)
@@ -675,6 +717,7 @@ def smart_controller_loop() -> None:
                     paused = failures >= 3
                     action.update(inflight=None, failure_count=failures, paused=paused,
                                   status="连续失败，已暂停" if paused else "等待后重试", error=result)
+                save_smart_runtime()
         time.sleep(5)
 
 def command_for(record: dict, request_id: str) -> dict | None:

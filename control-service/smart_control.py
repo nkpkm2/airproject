@@ -461,10 +461,12 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         score += max(-12, min(12, weather_score))
 
     if social:
-        # Social chatter is deliberately capped to 12 points and cannot alone
-        # trigger an extreme tier.
-        score += social * 4
-        reasons.append(f"过敏/花粉社交信号级别 {social}/3（权重上限 12%，需人工核验）")
+        # Allergy discussion is nonspecific and operator-reviewed, so it can
+        # justify only a modest normal-tier response even at the highest level.
+        # Keep it fresh for just 12 hours and never let it claim high/extreme.
+        social_points = social * 6
+        score += social_points
+        reasons.append(f"过敏/花粉社交信号级别 {social}/3（人工核验 +{social_points} 分；最多促成正常档，不代表柏科实测）")
     residual_active = False
     residual_remaining_h = 0.0
     if previous_peak_at and config.get("residual_hours", 0) > 0:

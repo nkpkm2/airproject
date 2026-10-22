@@ -587,12 +587,27 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(valid["season_start_md"], "02-29")
 
     def test_weather_and_social_cannot_claim_extreme_without_official_pollen(self):
-        config = smart.normalize_config({"social_level": 3})
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({"social_level": 3, "social_updated_at": int(now.timestamp() * 1000)})
         weather = {"current": {"temperature_2m": 15, "precipitation": 0, "cloud_cover": 10},
-                   "fetched_at_ms": int(datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp() * 1000),
+                   "fetched_at_ms": int(now.timestamp() * 1000),
                    "daily": {"sunshine_duration_s": [36000] * 4, "precipitation_sum_mm": [0] * 4}}
-        risk = smart.assess(config, weather, datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai")))
+        risk = smart.assess(config, weather, now)
         self.assertNotEqual(risk["tier"], "extreme")
+
+        # A verified severe allergy-discussion trend must be capable of the
+        # modest normal-tier response promised by the UI; at level 3 it yields
+        # 18 points but cannot independently claim high or extreme pollen.
+        social_only = smart.assess(config, None, now)
+        self.assertEqual(social_only["score"], 18)
+        self.assertEqual(social_only["tier"], "normal")
+        for level, expected_score in ((1, 6), (2, 12), (3, 18)):
+            with self.subTest(social_level=level):
+                signal = smart.normalize_config({"social_level": level,
+                    "social_updated_at": int(now.timestamp() * 1000)})
+                result = smart.assess(signal, None, now)
+                self.assertEqual(result["score"], expected_score)
+                self.assertNotIn(result["tier"], {"high", "extreme"})
 
     def test_rain_is_bounded_suppression_and_official_level_remains_primary(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))

@@ -226,6 +226,22 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         if weather_age is None:
             weather = None
             reasons.append("天气数据缺少有效抓取时间、已超过 60 分钟或时间异常，天气信号已忽略")
+    if weather and ("latitude" in weather or "longitude" in weather):
+        weather_latitude = _finite_number(weather.get("latitude"))
+        weather_longitude = _finite_number(weather.get("longitude"))
+        expected_latitude = _finite_number(config.get("latitude"))
+        expected_longitude = _finite_number(config.get("longitude"))
+        source_timezone = weather.get("timezone")
+        location_mismatch = (
+            weather_latitude is None or weather_longitude is None
+            or expected_latitude is None or expected_longitude is None
+            or not math.isclose(weather_latitude, expected_latitude, rel_tol=0, abs_tol=1e-6)
+            or not math.isclose(weather_longitude, expected_longitude, rel_tol=0, abs_tol=1e-6)
+            or (source_timezone is not None and source_timezone != config.get("timezone"))
+        )
+        if location_mismatch:
+            weather = None
+            reasons.append("天气数据地点/时区与当前设置不一致，已忽略并等待重新抓取")
 
     if official_signal:
         fetched_age = fresh_age_seconds(official_signal.get("fetched_at_ms"), 2 * 3600)

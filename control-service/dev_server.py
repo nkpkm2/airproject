@@ -427,6 +427,8 @@ def fetch_smart_weather(config: dict) -> dict:
     if not isinstance(current, dict) or not isinstance(hourly, dict) or not isinstance(daily, dict):
         raise ValueError("天气服务返回的数据格式不正确")
     return {
+        "latitude": float(config["latitude"]),
+        "longitude": float(config["longitude"]),
         "current": current,
         "hourly": {"time": hourly.get("time", [])[:72],
                    "temperature_2m": hourly.get("temperature_2m", [])[:72],
@@ -574,12 +576,14 @@ def _refresh_smart_weather(config: dict) -> None:
     try:
         value = fetch_smart_weather(config)
         with LOCK:
-            if (SMART_CONFIG.get("latitude"), SMART_CONFIG.get("longitude")) == (config.get("latitude"), config.get("longitude")):
+            if ((SMART_CONFIG.get("latitude"), SMART_CONFIG.get("longitude"), SMART_CONFIG.get("timezone"))
+                    == (config.get("latitude"), config.get("longitude"), config.get("timezone"))):
                 SMART_RUNTIME["weather"] = value
                 SMART_RUNTIME["weather_error"] = ""
     except Exception as error:
         with LOCK:
-            if (SMART_CONFIG.get("latitude"), SMART_CONFIG.get("longitude")) == (config.get("latitude"), config.get("longitude")):
+            if ((SMART_CONFIG.get("latitude"), SMART_CONFIG.get("longitude"), SMART_CONFIG.get("timezone"))
+                    == (config.get("latitude"), config.get("longitude"), config.get("timezone"))):
                 SMART_RUNTIME["weather_error"] = str(error)[:240]
 
 def _refresh_official_pollen(config: dict) -> None:
@@ -1097,6 +1101,11 @@ class Handler(BaseHTTPRequestHandler):
                             raise ValueError("启用前至少要为一台已完成四路光传感器标定的设备设置基准档位")
                     SMART_CONFIG.clear(); SMART_CONFIG.update(config); save_smart_config()
                     SMART_RUNTIME["weather_fetched_at"] = 0
+                    location_changed = any(config.get(key) != previous.get(key)
+                                           for key in ("latitude", "longitude", "timezone"))
+                    if location_changed:
+                        SMART_RUNTIME["weather"] = None
+                        SMART_RUNTIME["weather_error"] = ""
                     if config.get("official_url") != previous.get("official_url"):
                         SMART_RUNTIME["official_pollen"] = None
                         SMART_RUNTIME["official_pollen_fetched_at"] = 0

@@ -17,6 +17,7 @@ The controller calculates an explainable 0–100 score:
 - Missing, malformed, boolean, or non-finite weather fields are treated as unknown, not as zero rain or clear skies; sunny-weather bonuses require the needed observations to be present. The six-hour outlook selects timestamped observations from the actual next six local hours (not the first six hourly-array entries, which are often already in the past).
 - The six-hour risk explanation also reports sample counts for warm/clear, low-humidity, and high-rain-probability hours, so an operator can audit why the forecast score changed.
 - Weather is polled every 15 minutes and is ignored after 60 minutes, or if its fetch timestamp is missing or more than five minutes in the future. A failed refresh may retain the last payload for diagnostics, but the timestamp guard prevents stale weather from affecting the score.
+- Each weather payload is bound to the requested coordinates and timezone. Changing home location/timezone clears the cached forecast; a response that finishes after a location change is discarded, and the scoring function independently rejects mismatched location metadata.
 - Social/allergy chatter adds at most 12 points. It cannot on its own produce a high or extreme decision.
 - Configured annual local season adds 4 monitoring points only. It never claims that pollen was measured.
 - An official expected peak within the configured lead window requests one extra tier of pre-ramp.

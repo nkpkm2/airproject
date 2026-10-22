@@ -81,7 +81,8 @@ class SmartControlTests(unittest.TestCase):
     def test_smart_control_settings_are_persisted_but_unverified_devices_cannot_be_enabled(self):
         with tempfile.TemporaryDirectory() as folder:
             config = smart.default_config()
-            runtime = {"weather": None, "weather_fetched_at": 0, "last_peak_at": 0,
+            runtime = {"weather": {"latitude": 0, "longitude": 0}, "weather_fetched_at": 1,
+                       "last_peak_at": 0,
                        "effective_tier": "weak", "candidate_tier": "weak", "candidate_since": 0,
                        "device_actions": {}, "last_error": ""}
             with patch.object(server, "SMART_PATH", Path(folder) / "settings.json"), \
@@ -97,6 +98,7 @@ class SmartControlTests(unittest.TestCase):
                     saved = json.loads(request.read().decode())
                     self.assertFalse(saved["enabled"])
                     self.assertTrue((Path(folder) / "settings.json").exists())
+                    self.assertIsNone(runtime["weather"], "changing home location must clear the prior location's forecast")
                     payload.update(official_level=3, official_note="柏科高", official_url="https://www.beijing.gov.cn/a")
                     request = urlopen(Request(
                         base, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="PUT"), timeout=3)
@@ -511,6 +513,20 @@ class SmartControlTests(unittest.TestCase):
                 self.assertEqual(result["sources"]["weather"], "unavailable_or_stale")
                 self.assertTrue(any("天气数据" in reason for reason in result["reasons"]))
 
+    def test_weather_from_previous_location_or_timezone_is_never_scored(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        fetched = int(now.timestamp() * 1000)
+        config = smart.normalize_config({"latitude": 39.9, "longitude": 116.4,
+            "official_level": 2, "official_updated_at": fetched})
+        weather = {"fetched_at_ms": fetched, "latitude": 1.3, "longitude": 103.8,
+            "timezone": "Asia/Singapore",
+            "current": {"temperature_2m": 15, "precipitation": 0, "cloud_cover": 10}}
+        result = smart.assess(config, weather, now)
+        baseline = smart.assess(config, None, now)
+        self.assertEqual(result["score"], baseline["score"])
+        self.assertEqual(result["sources"]["weather"], "unavailable_or_stale")
+        self.assertTrue(any("地点/时区" in reason for reason in result["reasons"]))
+
     def test_missing_weather_fields_are_unknown_not_clear_sky(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
         fetched = int(now.timestamp() * 1000)
@@ -607,10 +623,22 @@ class SmartControlTests(unittest.TestCase):
             result = server.fetch_smart_weather(config)
         self.assertEqual(len(result["daily"]["time"]), 9)
         self.assertEqual(len(result["daily"]["precipitation_sum_mm"]), 9)
+        self.assertEqual(result["latitude"], config["latitude"])
+        self.assertEqual(result["longitude"], config["longitude"])
         query = server.urllib.parse.parse_qs(server.urllib.parse.urlsplit(request.call_args.args[0].full_url).query)
         self.assertEqual(query["past_days"], ["4"])
         self.assertIn("relative_humidity_2m", query["current"][0])
         self.assertIn("relative_humidity_2m", query["hourly"][0])
+
+    def test_weather_fetch_result_is_discarded_if_location_changes_mid_request(self):
+        requested = smart.normalize_config({"latitude": 39.9, "longitude": 116.4})
+        current = smart.normalize_config({"latitude": 1.3, "longitude": 103.8})
+        runtime = {"weather": None, "weather_error": ""}
+        fetched = {"latitude": 39.9, "longitude": 116.4, "timezone": requested["timezone"]}
+        with patch.object(server, "SMART_CONFIG", current), patch.object(server, "SMART_RUNTIME", runtime), \
+                patch.object(server, "fetch_smart_weather", return_value=fetched):
+            server._refresh_smart_weather(requested)
+        self.assertIsNone(runtime["weather"])
 
     def test_official_peak_preboosts_one_tier_within_configured_window(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))

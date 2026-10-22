@@ -118,6 +118,14 @@ class SmartControlTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "发布日期"):
             smart.parse_official_pollen_page(undated, now)
 
+        # Representative official forecast wording: publication date overlaps
+        # the range start, so the range parser must still identify the window.
+        official_style = "<p>发布日期：2026-03-17</p><p>3月17日至21日，北京大部分地区柏科花粉将陆续达到浓度高峰日。</p>"
+        parsed_peak = smart.parse_official_pollen_page(
+            official_style, datetime(2026, 3, 17, 8, tzinfo=ZoneInfo("Asia/Shanghai")))
+        self.assertEqual(parsed_peak["level"], 3)
+        self.assertEqual(parsed_peak["predicted_peak_at"], "2026-03-17T10:00:00+08:00")
+
     def test_official_page_fetch_is_limited_to_https_gov_cn(self):
         self.assertEqual(server.validate_official_pollen_url("https://www.beijing.gov.cn/a/b.html"),
                          "https://www.beijing.gov.cn/a/b.html")
@@ -290,6 +298,21 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(current, "high")
         current, candidate, since = smart.apply_hysteresis(current, candidate, since, "normal", 5_420)
         self.assertEqual(current, "normal")
+
+    def test_noisy_hourly_pollen_signal_does_not_chatter_across_risk_tiers(self):
+        effective, candidate, candidate_since = "weak", "weak", 0.0
+        transitions = []
+        start = 1_000_000.0
+        for tick in range(48 * 12):  # 48h, sampled every five minutes
+            now_s = start + tick * 300
+            # One five-minute high spike every hour, normal the rest of the time.
+            desired = "high" if tick % 12 == 0 else "normal"
+            previous = effective
+            effective, candidate, candidate_since = smart.apply_hysteresis(
+                effective, candidate, candidate_since, desired, now_s)
+            if effective != previous: transitions.append((now_s, previous, effective))
+        self.assertEqual(len(transitions), 1)
+        self.assertEqual(transitions[0][2], "high")
 
 
 if __name__ == "__main__":

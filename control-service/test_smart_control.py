@@ -426,6 +426,20 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(smart.assess(config, low_wind, now)["score"],
                          smart.assess(config, high_wind, now)["score"])
 
+    def test_relative_humidity_is_a_small_bidirectional_contextual_signal(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        fetched = int(now.timestamp() * 1000)
+        config = smart.normalize_config({"official_level": 2, "official_updated_at": fetched})
+        dry = {"fetched_at_ms": fetched, "current": {"temperature_2m": 15,
+            "relative_humidity_2m": 30, "precipitation": 0, "cloud_cover": 80}}
+        humid = {"fetched_at_ms": fetched, "current": {"temperature_2m": 15,
+            "relative_humidity_2m": 70, "precipitation": 0, "cloud_cover": 80}}
+        dry_risk = smart.assess(config, dry, now)
+        humid_risk = smart.assess(config, humid, now)
+        self.assertEqual(dry_risk["score"] - humid_risk["score"], 4)
+        self.assertTrue(any("相对湿度 30%" in reason for reason in dry_risk["reasons"]))
+        self.assertTrue(any("相对湿度 70%" in reason for reason in humid_risk["reasons"]))
+
     def test_rain_to_sun_is_bounded_and_sunny_streak_does_not_assume_depletion(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
         config = smart.normalize_config({"season_start_md": "03-01", "season_end_md": "05-01"})
@@ -503,7 +517,7 @@ class SmartControlTests(unittest.TestCase):
         config = smart.normalize_config({"official_level": 1, "official_updated_at": fetched})
         baseline = smart.assess(config, None, now)
         missing = {"fetched_at_ms": fetched, "current": {"temperature_2m": 15,
-            "precipitation": None, "cloud_cover": None},
+            "relative_humidity_2m": None, "precipitation": None, "cloud_cover": None},
             "daily": {"time": ["2026-04-01"], "sunshine_duration_s": [None],
                       "precipitation_sum_mm": [None]},
             "hourly": {"temperature_2m": [15], "precipitation_probability": [None],
@@ -512,6 +526,7 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(result["score"], baseline["score"] + 6)  # temperature alone is known
         self.assertEqual(result["forecast_score_6h"], result["score"])
         self.assertFalse(any("晴朗" in reason or "降水" in reason for reason in result["reasons"]))
+        self.assertFalse(any("相对湿度" in reason for reason in result["reasons"]))
 
     def test_six_hour_weather_outlook_uses_future_local_hours_not_midnight_prefix(self):
         now = datetime(2026, 4, 1, 14, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -590,6 +605,8 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(len(result["daily"]["precipitation_sum_mm"]), 9)
         query = server.urllib.parse.parse_qs(server.urllib.parse.urlsplit(request.call_args.args[0].full_url).query)
         self.assertEqual(query["past_days"], ["4"])
+        self.assertIn("relative_humidity_2m", query["current"][0])
+        self.assertIn("relative_humidity_2m", query["hourly"][0])
 
     def test_official_peak_preboosts_one_tier_within_configured_window(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))

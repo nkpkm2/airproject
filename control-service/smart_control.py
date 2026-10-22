@@ -260,11 +260,18 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
     if weather and weather_context_active and isinstance(weather.get("current"), dict):
         current = weather["current"]
         temp = _finite_number(current.get("temperature_2m"))
+        humidity = _finite_number(current.get("relative_humidity_2m"))
         rain = _finite_number(current.get("precipitation"))
         cloud = _finite_number(current.get("cloud_cover"))
         if temp is not None and 5 <= temp <= 22:
             weather_score += 6
             reasons.append(f"气温 {temp:g}°C 处于可能有利的释放温区（仅作弱辅助）")
+        if humidity is not None and humidity < 40:
+            weather_score += 2
+            reasons.append(f"相对湿度 {humidity:g}% 偏低，柏科花粉释放/悬浮可能性轻微上调")
+        elif humidity is not None and humidity >= 70:
+            weather_score -= 2
+            reasons.append(f"相对湿度 {humidity:g}% 偏高，空气中花粉倾向轻微下调")
         if rain is not None and rain >= 0.2:
             weather_score -= 12
             reasons.append("当前有降水，短时空气花粉倾向下调")
@@ -332,10 +339,12 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         hourly = weather["hourly"]
         times = hourly.get("time", [])
         temps = hourly.get("temperature_2m", [])
+        humidities = hourly.get("relative_humidity_2m", [])
         probs = hourly.get("precipitation_probability", [])
         clouds = hourly.get("cloud_cover", [])
         times = times if isinstance(times, list) else []
         temps = temps if isinstance(temps, list) else []
+        humidities = humidities if isinstance(humidities, list) else []
         probs = probs if isinstance(probs, list) else []
         clouds = clouds if isinstance(clouds, list) else []
         # Open-Meteo's local hourly arrays begin at midnight. Taking [:6]
@@ -346,7 +355,7 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         window_end = now_local + timedelta(hours=6)
         forecast_indices: list[int] = []
         for index, value in enumerate(times):
-            if index >= max(len(temps), len(probs), len(clouds)) or not isinstance(value, str):
+            if index >= max(len(temps), len(humidities), len(probs), len(clouds)) or not isinstance(value, str):
                 continue
             try:
                 sample_at = datetime.fromisoformat(value)
@@ -360,10 +369,13 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         delta = 0
         for index in forecast_indices:
             temp = _finite_number(temps[index]) if index < len(temps) else None
+            humidity = _finite_number(humidities[index]) if index < len(humidities) else None
             rain_probability = _finite_number(probs[index]) if index < len(probs) else None
             cloud = _finite_number(clouds[index]) if index < len(clouds) else None
             if (temp is not None and 5 <= temp <= 22 and rain_probability is not None
                     and rain_probability < 30 and cloud is not None and cloud < 45):
+                delta += 1
+            if humidity is not None and humidity < 40:
                 delta += 1
             if rain_probability is not None and rain_probability >= 60: delta -= 2
         forecast_hours_used = len(forecast_indices)

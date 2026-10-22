@@ -410,8 +410,8 @@ def fetch_smart_weather(config: dict) -> dict:
     """Fetch bounded public weather context; it is never presented as pollen data."""
     query = urllib.parse.urlencode({
         "latitude": config["latitude"], "longitude": config["longitude"],
-        "current": "temperature_2m,precipitation,cloud_cover,wind_speed_10m",
-        "hourly": "temperature_2m,precipitation_probability,cloud_cover,wind_speed_10m",
+        "current": "temperature_2m,relative_humidity_2m,precipitation,cloud_cover",
+        "hourly": "temperature_2m,relative_humidity_2m,precipitation_probability,cloud_cover",
         "daily": "precipitation_sum,sunshine_duration", "past_days": 4, "forecast_days": 4,
         "timezone": config.get("timezone", "Asia/Shanghai"),
     })
@@ -430,6 +430,7 @@ def fetch_smart_weather(config: dict) -> dict:
         "current": current,
         "hourly": {"time": hourly.get("time", [])[:72],
                    "temperature_2m": hourly.get("temperature_2m", [])[:72],
+                   "relative_humidity_2m": hourly.get("relative_humidity_2m", [])[:72],
                    "precipitation_probability": hourly.get("precipitation_probability", [])[:72],
                    "cloud_cover": hourly.get("cloud_cover", [])[:72],
                    "wind_speed_10m": hourly.get("wind_speed_10m", [])[:72]},

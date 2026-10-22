@@ -456,7 +456,11 @@ def fetch_smart_weather(config: dict) -> dict:
         "latitude": config["latitude"], "longitude": config["longitude"],
         "current": "temperature_2m,relative_humidity_2m,precipitation,cloud_cover",
         "hourly": "temperature_2m,relative_humidity_2m,precipitation_probability,cloud_cover",
-        "daily": "precipitation_sum,sunshine_duration", "past_days": 4, "forecast_days": 4,
+        # Keep one week of local daily temperature history. Cupressaceae
+        # studies report delayed (multi-day) temperature associations, so
+        # the scorer can inspect days -7 through -2 without guessing from a
+        # single current reading. This is still weather context, not pollen.
+        "daily": "precipitation_sum,sunshine_duration,temperature_2m_mean", "past_days": 7, "forecast_days": 4,
         "timezone": config.get("timezone", "Asia/Shanghai"),
     })
     request = urllib.request.Request(
@@ -484,9 +488,10 @@ def fetch_smart_weather(config: dict) -> dict:
                    "precipitation_probability": hourly.get("precipitation_probability", [])[-256:],
                    "cloud_cover": hourly.get("cloud_cover", [])[-256:],
                    "wind_speed_10m": hourly.get("wind_speed_10m", [])[-256:]},
-        "daily": {"time": daily.get("time", [])[:9],
-                  "precipitation_sum_mm": daily.get("precipitation_sum", [])[:9],
-                  "sunshine_duration_s": daily.get("sunshine_duration", [])[:9]},
+        "daily": {"time": daily.get("time", [])[:12],
+                  "precipitation_sum_mm": daily.get("precipitation_sum", [])[:12],
+                  "sunshine_duration_s": daily.get("sunshine_duration", [])[:12],
+                  "temperature_mean_c": daily.get("temperature_2m_mean", [])[:12]},
         "timezone": body.get("timezone", config.get("timezone")),
         "fetched_at_ms": int(time.time() * 1000),
         "attribution": "Open-Meteo weather forecast; not a Cupressaceae pollen forecast",

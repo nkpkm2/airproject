@@ -23,8 +23,9 @@ class SmartControlTests(unittest.TestCase):
         self.assertIn('id="social-signal-refresh"', page)
         self.assertIn('id="smart-arrow"', page)
         self.assertIn('id="rain-suppression"', page)
-        self.assertIn("fleet.css?v=20261022-smart16", page)
-        self.assertIn("fleet.js?v=20261022-smart16", page)
+        self.assertIn("fleet.css?v=20261022-smart17", page)
+        self.assertIn("fleet.js?v=20261022-smart17", page)
+        self.assertIn("forecastPollenLevel=Number(pollen?.forecast_level||0)", script)
         self.assertIn("不是室内花粉清除时间", page)
         self.assertIn("rain_suppression:$('rain-suppression').checked", script)
         self.assertIn("$('smart-open').onclick=toggleSmart", script)
@@ -344,6 +345,12 @@ class SmartControlTests(unittest.TestCase):
         undated = "<p>柏科花粉浓度极高，侧柏进入散粉高峰</p>"
         with self.assertRaisesRegex(ValueError, "发布日期"):
             smart.parse_official_pollen_page(undated, now)
+        future_without_window = (
+            "<p>发布日期：2026年4月1日</p>"
+            "<p>未来柏科花粉预计达到极高水平。</p>"
+        )
+        with self.assertRaisesRegex(ValueError, "缺少明确高峰日期范围"):
+            smart.parse_official_pollen_page(future_without_window, now)
 
         # Representative official forecast wording: publication date overlaps
         # the range start, so the range parser must still identify the window.
@@ -379,7 +386,49 @@ class SmartControlTests(unittest.TestCase):
         )
         parsed_not_yet_peak = smart.parse_official_pollen_page(not_yet_peak, now)
         self.assertEqual(parsed_not_yet_peak["level"], 2)
+        self.assertEqual(parsed_not_yet_peak["forecast_level"], 0,
+                         "a negatively worded future peak must not invent a forecast grade")
         self.assertEqual(parsed_not_yet_peak["predicted_peak_at"], "2026-04-05T00:00:00+08:00")
+
+        mixed_current_and_forecast = (
+            "<p>发布时间：2026年4月1日</p>"
+            "<p>今日柏科花粉浓度低。</p>"
+            "<p>预计4月5日至8日柏科花粉高峰，浓度可达4级。</p>"
+        )
+        parsed_mixed = smart.parse_official_pollen_page(mixed_current_and_forecast, now)
+        self.assertEqual(parsed_mixed["current_level"], 1)
+        self.assertEqual(parsed_mixed["forecast_level"], 4)
+        self.assertEqual(parsed_mixed["level"], 1, "legacy display level should describe current conditions when available")
+        fetched_now = dict(parsed_mixed, fetched_at_ms=int(now.timestamp() * 1000))
+        before_peak = smart.assess(smart.normalize_config({}), None, now,
+                                   official_signal=fetched_now)
+        self.assertEqual(before_peak["score"], 12)
+        self.assertEqual(before_peak["official_forecast_level"], 4)
+        peak_now = datetime(2026, 4, 5, 12, tzinfo=now.tzinfo)
+        during_peak = smart.assess(smart.normalize_config({}), None, peak_now,
+                                   official_signal=dict(parsed_mixed,
+                                       fetched_at_ms=int(peak_now.timestamp() * 1000)))
+        self.assertEqual(during_peak["score"], 72,
+                         "a fresh page's old current level must expire while its dated forecast remains active")
+
+        high_now_and_future = (
+            "<p>发布时间：2026年4月1日</p>"
+            "<p>当前柏科花粉浓度极高，预计4月5日至8日仍处于高峰。</p>"
+        )
+        parsed_high_now = smart.parse_official_pollen_page(high_now_and_future, now)
+        self.assertEqual(parsed_high_now["current_level"], 4)
+        high_current_risk = smart.assess(smart.normalize_config({}), None, now,
+            official_signal=dict(parsed_high_now, fetched_at_ms=int(now.timestamp() * 1000)))
+        self.assertEqual(high_current_risk["score"], 72,
+                         "a high current concentration must not be demoted into the future forecast lane")
+
+        terse_future = (
+            "<p>发布日期：2026年4月1日</p>"
+            "<p>4月5日至8日柏科花粉高峰。</p>"
+        )
+        parsed_terse_future = smart.parse_official_pollen_page(terse_future, now)
+        self.assertEqual(parsed_terse_future["current_level"], 0)
+        self.assertEqual(parsed_terse_future["forecast_level"], 3)
 
         # The official local phenology notices can describe only旬-level
         # windows (“3月中下旬至4月上旬”), so retain a clearly approximate range.
@@ -1095,25 +1144,81 @@ class SmartControlTests(unittest.TestCase):
         self.assertEqual(result["score"], baseline["score"])
         self.assertEqual(result["forecast_score_6h"], baseline["forecast_score_6h"])
 
-    def test_weather_fetch_requests_and_preserves_four_days_of_daily_history(self):
+    def test_weather_fetch_requests_and_preserves_seven_days_of_daily_history(self):
         class Response:
             def __enter__(self): return self
             def __exit__(self, *_): return False
             def read(self):
                 return json.dumps({"current": {}, "hourly": {}, "daily": {
-                    "time": [f"2026-03-{day:02d}" for day in range(28, 32)] + [f"2026-04-0{day}" for day in range(1, 6)],
-                    "precipitation_sum": [0] * 9, "sunshine_duration": [36000] * 9}}).encode()
+                    "time": [f"2026-03-{day:02d}" for day in range(25, 32)] + [f"2026-04-0{day}" for day in range(1, 6)],
+                    "precipitation_sum": [0] * 12, "sunshine_duration": [36000] * 12,
+                    "temperature_2m_mean": [17] * 12}}).encode()
         config = smart.default_config(); config.update(latitude=1.3, longitude=103.8)
         with patch.object(server.urllib.request, "urlopen", return_value=Response()) as request:
             result = server.fetch_smart_weather(config)
-        self.assertEqual(len(result["daily"]["time"]), 9)
-        self.assertEqual(len(result["daily"]["precipitation_sum_mm"]), 9)
+        self.assertEqual(len(result["daily"]["time"]), 12)
+        self.assertEqual(len(result["daily"]["precipitation_sum_mm"]), 12)
+        self.assertEqual(len(result["daily"]["temperature_mean_c"]), 12)
         self.assertEqual(result["latitude"], config["latitude"])
         self.assertEqual(result["longitude"], config["longitude"])
         query = server.urllib.parse.parse_qs(server.urllib.parse.urlsplit(request.call_args.args[0].full_url).query)
-        self.assertEqual(query["past_days"], ["4"])
+        self.assertEqual(query["past_days"], ["7"])
+        self.assertIn("temperature_2m_mean", query["daily"][0])
         self.assertIn("relative_humidity_2m", query["current"][0])
         self.assertIn("relative_humidity_2m", query["hourly"][0])
+
+    def test_lagged_temperature_is_small_gated_and_ignores_today_and_yesterday(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        fetched = int(now.timestamp() * 1000)
+        config = smart.normalize_config({"official_level": 1, "official_updated_at": fetched})
+        base = smart.assess(config, None, now)["score"]
+        dates = [f"2026-03-{day:02d}" for day in range(25, 32)] + [
+            "2026-04-01", "2026-04-02"]
+        weather = {
+            "fetched_at_ms": fetched,
+            "current": {"temperature_2m": None, "relative_humidity_2m": None,
+                        "precipitation": None, "cloud_cover": None},
+            "daily": {"time": dates, "temperature_mean_c": [17] * 6 + [None, None, 17, 17],
+                      "sunshine_duration_s": [None] * len(dates),
+                      "precipitation_sum_mm": [None] * len(dates)},
+        }
+        warm_lag = smart.assess(config, weather, now)
+        self.assertEqual(warm_lag["score"], base + 3)
+        self.assertTrue(any("前 2–7 日平均气温" in reason for reason in warm_lag["reasons"]))
+
+        recent_only = dict(weather, daily={**weather["daily"],
+            "temperature_mean_c": [5] * 6 + [17, 17, 17, 17]})
+        self.assertEqual(smart.assess(config, recent_only, now)["score"], base,
+                         "today/yesterday warmth must not leak into the 2–7-day lag window")
+
+        # Warm weather without current pollen context is not enough to create
+        # a pollen signal, and an incomplete history is treated as unknown.
+        outside_season = smart.assess(smart.normalize_config({}), weather, now)
+        self.assertEqual(outside_season["score"], 0)
+        short_history = dict(weather, daily={**weather["daily"],
+            "temperature_mean_c": [17, 17, None, None, None, None, None, None, 17, 17]})
+        incomplete = smart.assess(config, short_history, now)
+        self.assertEqual(incomplete["score"], base)
+
+    def test_lagged_temperature_curve_is_continuous_and_rejects_invalid_samples(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        fetched = int(now.timestamp() * 1000)
+        config = smart.normalize_config({"official_level": 1, "official_updated_at": fetched})
+        dates = [f"2026-03-{day:02d}" for day in range(25, 32)] + ["2026-04-01"]
+
+        def lagged_score(temperature):
+            weather = {"fetched_at_ms": fetched, "current": {}, "daily": {
+                "time": dates,
+                "temperature_mean_c": [temperature] * 6 + [None, None],
+            }}
+            return smart.assess(config, weather, now)["score"]
+
+        for left, right in ((7.99, 8.01), (15.99, 16.01),
+                            (17.99, 18.01), (23.99, 24.01)):
+            with self.subTest(temperature=(left, right)):
+                self.assertLessEqual(abs(lagged_score(left) - lagged_score(right)), 0.1)
+        self.assertEqual(lagged_score(float("nan")),
+                         smart.assess(config, None, now)["score"])
 
     def test_weather_fetch_result_is_discarded_if_location_changes_mid_request(self):
         requested = smart.normalize_config({"latitude": 39.9, "longitude": 116.4})

@@ -310,26 +310,65 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             published_age = fresh_age_seconds(
                 official_signal.get("published_at_ms"),
                 _MAX_EXPLICIT_OFFICIAL_WINDOW_DAYS * 24 * 3600)
-        try: candidate = int(official_signal.get("level", 0))
-        except (TypeError, ValueError): candidate = 0
-        if (fetched_age is not None and published_age is not None and 1 <= candidate <= 4
-                and not peak_window_expired):
-            official_signal_valid = True
-            if peak_start_at is not None and now_local < peak_start_at:
-                official_forecast_level = candidate
-                official_forecast_peak_at = peak_start_at.isoformat()
-                if official == 0:
-                    official_source = "verified_gov_cn_page_forecast"
-                reasons.append(
-                    f"官方柏科预报等级 {candidate}/4 对应未来峰值时段，预计始于 {peak_start_at.isoformat()}；"
-                    "到达预升档窗口前不把它当作当前浓度"
-                )
-            else:
-                official = max(official, candidate)
+        split_levels = "current_level" in official_signal or "forecast_level" in official_signal
+        if split_levels:
+            try: current_candidate = int(official_signal.get("current_level", 0))
+            except (TypeError, ValueError, OverflowError): current_candidate = 0
+            try: forecast_candidate = int(official_signal.get("forecast_level", 0))
+            except (TypeError, ValueError, OverflowError): forecast_candidate = 0
+            current_published_age = fresh_age_seconds(official_signal.get("published_at_ms"), 48 * 3600)
+            current_used = bool(fetched_age is not None and current_published_age is not None
+                                and 1 <= current_candidate <= 4)
+            forecast_used = False
+            if current_used:
+                official = max(official, current_candidate)
                 official_source = "verified_gov_cn_page"
+                official_signal_valid = True
+                reasons.append(f"官方页面当前柏科等级 {current_candidate}/4（仅采信 48 小时内发布的当前描述）")
+            if (fetched_age is not None and published_age is not None
+                    and 1 <= forecast_candidate <= 4 and peak_start_at is not None
+                    and peak_window_active):
+                forecast_used = True
+                official_signal_valid = True
+                if now_local < peak_start_at:
+                    official_forecast_level = forecast_candidate
+                    official_forecast_peak_at = peak_start_at.isoformat()
+                    if not current_used:
+                        official_source = "verified_gov_cn_page_forecast"
+                    reasons.append(
+                        f"官方柏科未来预报等级 {forecast_candidate}/4 对应峰值时段，预计始于 "
+                        f"{peak_start_at.isoformat()}；到达预升档窗口前不把它当作当前浓度"
+                    )
+                else:
+                    official = max(official, forecast_candidate)
+                    official_source = "verified_gov_cn_page"
+                    reasons.append(f"官方柏科预报峰值窗口生效（等级 {forecast_candidate}/4）")
+            if not current_used and not forecast_used:
+                reason = "官方柏科高峰窗口已结束" if peak_window_expired else "自动读取的官方当前/未来等级超过控制有效期或时间异常"
+                reasons.append(f"{reason}，未参与控制")
         else:
-            reason = "官方柏科高峰窗口已结束" if peak_window_expired else "自动读取的官方预报超过控制有效期或时间异常"
-            reasons.append(f"{reason}，未参与控制")
+            # Backward compatibility for persisted/test signals created before
+            # the parser separated current observations from future forecasts.
+            try: candidate = int(official_signal.get("level", 0))
+            except (TypeError, ValueError, OverflowError): candidate = 0
+            if (fetched_age is not None and published_age is not None and 1 <= candidate <= 4
+                    and not peak_window_expired):
+                official_signal_valid = True
+                if peak_start_at is not None and now_local < peak_start_at:
+                    official_forecast_level = candidate
+                    official_forecast_peak_at = peak_start_at.isoformat()
+                    if official == 0:
+                        official_source = "verified_gov_cn_page_forecast"
+                    reasons.append(
+                        f"官方柏科预报等级 {candidate}/4 对应未来峰值时段，预计始于 {peak_start_at.isoformat()}；"
+                        "到达预升档窗口前不把它当作当前浓度"
+                    )
+                else:
+                    official = max(official, candidate)
+                    official_source = "verified_gov_cn_page"
+            else:
+                reason = "官方柏科高峰窗口已结束" if peak_window_expired else "自动读取的官方预报超过控制有效期或时间异常"
+                reasons.append(f"{reason}，未参与控制")
     # A manually verified future bulletin is not a current concentration
     # reading. Stage it in the forecast lane, then promote it during its
     # explicit peak window; this mirrors the government-page parser path.
@@ -458,13 +497,45 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         forecast = forecast if isinstance(forecast, dict) else {}
         sunny = forecast.get("sunshine_duration_s", [])
         rain_sum = forecast.get("precipitation_sum_mm", [])
+        daily_temps = forecast.get("temperature_mean_c", [])
         sunny = sunny if isinstance(sunny, list) else []
         rain_sum = rain_sum if isinstance(rain_sum, list) else []
-        if sunny and rain_sum:
-            days = forecast.get("time", [])
-            days = days if isinstance(days, list) else []
-            try: today_index = days.index(now_local.date().isoformat())
-            except (ValueError, AttributeError): today_index = 0
+        daily_temps = daily_temps if isinstance(daily_temps, list) else []
+        days = forecast.get("time", [])
+        days = days if isinstance(days, list) else []
+        try:
+            today_index = days.index(now_local.date().isoformat())
+        except (ValueError, AttributeError):
+            today_index = None
+        if today_index is not None and daily_temps:
+            # A Beijing time-series study found delayed temperature
+            # associations at roughly 2–7 days. Treat that only as a small,
+            # non-negative support signal, gated by present pollen context;
+            # never infer pollen from warm history alone. Ignore today and
+            # yesterday to avoid double-counting the direct weather terms.
+            start = max(0, today_index - 7)
+            end = min(today_index - 1, len(daily_temps), len(days))
+            lagged_values = [value for value in (
+                _bounded_weather_number(daily_temps[index], -50, 60)
+                for index in range(start, end)
+            ) if value is not None]
+            if len(lagged_values) >= 3:
+                lagged_mean = sum(lagged_values) / len(lagged_values)
+                lag_factor = 0.0
+                if 8 < lagged_mean < 16:
+                    lag_factor = (lagged_mean - 8) / 8
+                elif 16 <= lagged_mean <= 18:
+                    lag_factor = 1.0
+                elif 18 < lagged_mean < 24:
+                    lag_factor = (24 - lagged_mean) / 6
+                lagged_temperature_points = 3 * lag_factor
+                weather_score += lagged_temperature_points
+                if lagged_temperature_points > 0:
+                    reasons.append(
+                        f"前 2–7 日平均气温 {lagged_mean:.1f}°C，依据延迟相关研究仅作轻微辅助 "
+                        f"(+{lagged_temperature_points:.1f} 分；非花粉测量)"
+                    )
+        if today_index is not None and sunny and rain_sum:
             today_index = min(today_index, len(sunny) - 1, len(rain_sum) - 1)
             today_sun_s = _bounded_weather_number(sunny[today_index], 0, 86_400)
             today_sun = today_sun_s / 3600 if today_sun_s is not None else None
@@ -707,20 +778,60 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
     if not positions:
         raise ValueError("公告未明确提到柏科/侧柏，避免把杂草花粉误当柏花粉")
     context = " … ".join(text[max(0, index - 300):min(len(text), index + 1_200)] for index in positions[:4])
-    numeric_range = re.search(r"(?<!\d)([1-5])\s*级?\s*(?:到|至|[-~～—–－])\s*([1-5])\s*级", context)
-    range_is_valid = bool(numeric_range and _has_unnegated_phrase(re.escape(numeric_range.group(0)), context))
-    if range_is_valid:
-        # Do not promote a band such as “3到4级（中等到高级别）” to its
-        # upper endpoint; choose the lower bound to avoid overreacting to an
-        # interval that explicitly includes less severe days/areas.
-        level = min(4, min(int(numeric_range.group(1)), int(numeric_range.group(2))))
-        level_precision = "range_lower_bound"
-    elif _has_unnegated_phrase(r"极高|爆表|非常高|\b(?:4|5)\s*级\b", context): level = 4
-    elif _has_unnegated_phrase(r"高峰|高浓度|浓度(?:较)?高|水平较高|高风险|\b3\s*级\b", context): level = 3
-    elif _has_unnegated_phrase(r"中等|中度|\b2\s*级\b|适中", context): level = 2
-    elif _has_unnegated_phrase(r"低浓度|较低|偏低|\b1\s*级\b|低风险", context): level = 1
-    else: raise ValueError("公告提到柏科但没有可判读的浓度级别/高峰信息")
-    if not range_is_valid: level_precision = "explicit"
+    def level_in(statement: str) -> tuple[int, str] | None:
+        numeric_range = re.search(r"(?<!\d)([1-5])\s*级?\s*(?:到|至|[-~～—–－])\s*([1-5])\s*级", statement)
+        range_is_valid = bool(numeric_range and _has_unnegated_phrase(re.escape(numeric_range.group(0)), statement))
+        if range_is_valid:
+            # Do not promote a band such as “3到4级（中等到高级别）” to its
+            # upper endpoint; choose the lower bound to avoid overreacting to an
+            # interval that explicitly includes less severe days/areas.
+            return min(4, min(int(numeric_range.group(1)), int(numeric_range.group(2)))), "range_lower_bound"
+        if _has_unnegated_phrase(r"极高|爆表|非常高|(?<!\d)(?:4|5)\s*级(?!\d)", statement): return 4, "explicit"
+        if _has_unnegated_phrase(r"高峰|高浓度|浓度(?:较|偏)?高|水平较高|高风险|(?<!\d)3\s*级(?!\d)", statement): return 3, "explicit"
+        if _has_unnegated_phrase(r"中等|中度|(?<!\d)2\s*级(?!\d)|适中", statement): return 2, "explicit"
+        if _has_unnegated_phrase(r"低浓度|浓度(?:较|偏)?低|较低|偏低|(?<!\d)1\s*级(?!\d)|低风险", statement): return 1, "explicit"
+        return None
+
+    overall = level_in(context)
+    if overall is None:
+        raise ValueError("公告提到柏科但没有可判读的浓度级别/高峰信息")
+    forecast_cue = re.compile(r"预计|预测|预报|将|未来|有望|可能|或将")
+    current_cue = re.compile(r"当前|目前|今日|今天|实时|现阶段|现时")
+    current_levels: list[tuple[int, str]] = []
+    inferred_from_whole_context = False
+    for cue in current_cue.finditer(context):
+        # Limit the current assertion to its punctuation-delimited clause and
+        # stop before a later forecast clause. A single article can contain a
+        # low current level and a high future peak; those are separate signals.
+        left = max(context.rfind(mark, 0, cue.start()) for mark in "。；！？!?…") + 1
+        delimiters = [position for mark in "。；！？!?…" if (position := context.find(mark, cue.end())) >= 0]
+        right = min(delimiters) if delimiters else len(context)
+        statement = context[left:right]
+        later_forecast = forecast_cue.search(statement, cue.end() - left)
+        if later_forecast:
+            statement = statement[:later_forecast.start()]
+        nearby = context[max(0, cue.start() - 160):min(len(context), cue.end() + 160)]
+        if pollen_terms.search(statement) or pollen_terms.search(nearby):
+            value = level_in(statement)
+            if value: current_levels.append(value)
+    current_level = max(current_levels, default=(0, "explicit"), key=lambda item: item[0])[0]
+    current_precision = next((precision for value, precision in sorted(current_levels, reverse=True)
+                              if value == current_level), "explicit")
+    if not current_level:
+        first_forecast = forecast_cue.search(context)
+        pre_forecast = context[:first_forecast.start()] if first_forecast else context
+        pre_level = level_in(pre_forecast) if pollen_terms.search(pre_forecast) else None
+        if pre_level:
+            current_level, current_precision = pre_level
+            inferred_from_whole_context = first_forecast is None
+        elif not first_forecast:
+            # Recent undated official bulletins can be current observations;
+            # dated future-only language is staged in the forecast lane below.
+            current_level, current_precision = overall
+            inferred_from_whole_context = True
+    forecast_level = 0
+    level = current_level or overall[0]
+    level_precision = current_precision if current_level else overall[1]
     peak_at = None
     peak_until = None
     approximate_peak_window = False
@@ -860,9 +971,43 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
             raise ValueError("官方高峰日期超过 45 天预报范围，暂不采信")
         if peak_until_at < now - timedelta(hours=12):
             raise ValueError("该官方柏科高峰窗口已结束，未采信旧预报")
-    elif age_days > _RECENT_OFFICIAL_ARTICLE_DAYS:
+        if inferred_from_whole_context and peak_start_at.date() > published.date():
+            peak_phrase = re.search(r"高峰(?:日|期)?|达峰|峰值", context)
+            before_peak = context[:peak_phrase.start()] if peak_phrase else ""
+            current_value = level_in(before_peak) if pollen_terms.search(before_peak) else None
+            current_level = current_value[0] if current_value else 0
+            current_precision = current_value[1] if current_value else "explicit"
+        future_match = forecast_cue.search(context)
+        forecast_value = None
+        if future_match:
+            forecast_value = level_in(context[future_match.start():])
+        else:
+            peak_match = re.search(r"高峰(?:日|期)?|达峰|峰值", context)
+            if peak_match:
+                left = max(context.rfind(mark, 0, peak_match.start()) for mark in "。；！？!?…") + 1
+                right_positions = [position for mark in "。；！？!?…"
+                                   if (position := context.find(mark, peak_match.end())) >= 0]
+                right = min(right_positions) if right_positions else len(context)
+                peak_statement = context[left:right]
+                if _has_unnegated_phrase(r"高峰(?:日|期)?|达峰|峰值", peak_statement):
+                    forecast_value = level_in(peak_statement)
+        # If the bulletin contains only an explicitly current statement plus
+        # a dated peak window, that same level is the conservative fallback.
+        # A negative/future phrase with no readable forecast level remains
+        # unscored in the forecast lane rather than borrowing an unrelated
+        # current value.
+        forecast_level = (forecast_value[0] if forecast_value else
+                          current_level if not future_match and _has_unnegated_phrase(
+                              r"高峰(?:日|期)?|达峰|峰值", context) else 0)
+    level = current_level or forecast_level or overall[0]
+    level_precision = current_precision if current_level else overall[1]
+    if not peak_at and age_days > _RECENT_OFFICIAL_ARTICLE_DAYS:
         raise ValueError("超过 7 天的公告必须包含仍有效的明确高峰日期范围")
-    return {"level": level, "published_at_ms": int(published.timestamp() * 1000),
+    if not peak_at and current_level == 0:
+        raise ValueError("未来柏科预报缺少明确高峰日期范围，不能作为当前等级或控制信号")
+    return {"level": level, "current_level": current_level,
+            "forecast_level": forecast_level if peak_at else 0,
+            "published_at_ms": int(published.timestamp() * 1000),
             "level_precision": level_precision,
             "predicted_peak_at": peak_at, "predicted_peak_until": peak_until,
             "peak_time_precision": ("approximate_month_decade_calendar_day" if approximate_peak_window

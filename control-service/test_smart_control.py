@@ -606,20 +606,55 @@ class SmartControlTests(unittest.TestCase):
         drizzle = score_for_rain(0.01)
         light_rain = score_for_rain(0.1)
         steady_rain = score_for_rain(0.5)
-        heavy_rain = score_for_rain(1)
+        heavy_rain = score_for_rain(2.5)
 
         # Tiny rolling accumulations should not be mistaken for a wash-off.
         self.assertEqual(drizzle["score"], dry["score"])
-        self.assertEqual(dry["score"] - light_rain["score"], 2)
-        self.assertEqual(dry["score"] - steady_rain["score"], 6)
+        self.assertAlmostEqual(dry["score"] - light_rain["score"], 0.5)
+        self.assertEqual(dry["score"] - steady_rain["score"], 4)
         self.assertEqual(dry["score"] - heavy_rain["score"], 10)
-        self.assertTrue(any("少量降水" in reason for reason in light_rain["reasons"]))
-        self.assertTrue(any("明显下调" in reason for reason in heavy_rain["reasons"]))
+        self.assertTrue(any("连续雨强辅助" in reason for reason in light_rain["reasons"]))
+        self.assertTrue(any("连续雨强辅助" in reason for reason in heavy_rain["reasons"]))
 
         # A precipitation amount without its averaging interval is ambiguous.
         missing_interval = {"fetched_at_ms": fetched_at_ms, "current": {
             "temperature_2m": 15, "precipitation": 5, "cloud_cover": 80}}
         self.assertEqual(smart.assess(config, missing_interval, now)["score"], dry["score"])
+
+    def test_weather_assistance_is_continuous_near_temperature_and_rain_knots(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        fetched = int(now.timestamp() * 1000)
+        config = smart.normalize_config({"official_level": 2, "official_updated_at": fetched})
+
+        def current_score(temp=None, rain_rate=0, humidity=55):
+            current = {"relative_humidity_2m": humidity, "precipitation": rain_rate * 900 / 3600,
+                       "interval": 900, "cloud_cover": 80}
+            if temp is not None: current["temperature_2m"] = temp
+            return smart.assess(config, {"fetched_at_ms": fetched, "current": current}, now)["score"]
+
+        for left, right in ((4.99, 5.01), (9.99, 10.01), (17.99, 18.01), (21.99, 22.01)):
+            with self.subTest(temperature=(left, right)):
+                self.assertLessEqual(abs(current_score(temp=left) - current_score(temp=right)), 0.1)
+        for left, right in ((0.19, 0.21), (0.99, 1.01), (2.99, 3.01), (7.99, 8.01)):
+            with self.subTest(rain_rate=(left, right)):
+                self.assertLessEqual(abs(current_score(rain_rate=left) - current_score(rain_rate=right)), 0.2)
+        for left, right in ((29.99, 30.01), (49.99, 50.01), (59.99, 60.01), (79.99, 80.01)):
+            with self.subTest(humidity=(left, right)):
+                self.assertLessEqual(abs(current_score(humidity=left) - current_score(humidity=right)), 0.1)
+        rain_scores = [current_score(rain_rate=rate) for rate in (0, .1, .2, .5, 1, 2, 3, 5, 8, 12)]
+        self.assertTrue(all(later <= earlier for earlier, later in zip(rain_scores, rain_scores[1:])))
+
+    def test_forecasted_daily_rain_does_not_suppress_current_risk_before_it_rains(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        fetched = int(now.timestamp() * 1000)
+        config = smart.normalize_config({"official_level": 2, "official_updated_at": fetched})
+        base = {"fetched_at_ms": fetched, "current": {"temperature_2m": 15,
+            "relative_humidity_2m": 55, "precipitation": 0, "interval": 900, "cloud_cover": 80},
+            "daily": {"time": ["2026-04-01"], "sunshine_duration_s": [0]}}
+        dry_forecast = {**base, "daily": {**base["daily"], "precipitation_sum_mm": [0]}}
+        wet_forecast = {**base, "daily": {**base["daily"], "precipitation_sum_mm": [20]}}
+        self.assertEqual(smart.assess(config, dry_forecast, now)["score"],
+                         smart.assess(config, wet_forecast, now)["score"])
 
     def test_wind_speed_alone_is_not_used_as_a_positive_pollen_proxy(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -642,14 +677,14 @@ class SmartControlTests(unittest.TestCase):
             "relative_humidity_2m": 70, "precipitation": 0, "cloud_cover": 80}}
         dry_risk = smart.assess(config, dry, now)
         humid_risk = smart.assess(config, humid, now)
-        self.assertEqual(dry_risk["score"] - humid_risk["score"], 4)
+        self.assertEqual(dry_risk["score"] - humid_risk["score"], 3)
         self.assertTrue(any("相对湿度 30%" in reason for reason in dry_risk["reasons"]))
         self.assertTrue(any("相对湿度 70%" in reason for reason in humid_risk["reasons"]))
 
     def test_rain_to_sun_is_bounded_and_sunny_streak_does_not_assume_depletion(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
         config = smart.normalize_config({"season_start_md": "03-01", "season_end_md": "05-01"})
-        current = {"temperature_2m": 15, "precipitation": 0, "cloud_cover": 80}
+        current = {"temperature_2m": 15, "precipitation": 0, "interval": 900, "cloud_cover": 80}
         times = ["2026-03-28", "2026-03-29", "2026-03-30", "2026-03-31", "2026-04-01",
                  "2026-04-02", "2026-04-03", "2026-04-04", "2026-04-05"]
         fetched_at_ms = int(now.timestamp() * 1000)

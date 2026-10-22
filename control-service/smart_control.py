@@ -389,15 +389,29 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
         rain = _bounded_weather_number(current.get("precipitation"), 0, 10_000)
         rain_interval_s = _bounded_weather_number(current.get("interval"), 1, 7_200)
         cloud = _bounded_weather_number(current.get("cloud_cover"), 0, 100)
-        if temp is not None and 5 <= temp <= 22:
-            weather_score += 6
-            reasons.append(f"气温 {temp:g}°C 处于可能有利的释放温区（仅作弱辅助）")
-        if humidity is not None and humidity < 40:
-            weather_score += 2
-            reasons.append(f"相对湿度 {humidity:g}% 偏低，柏科花粉释放/悬浮可能性轻微上调")
-        elif humidity is not None and humidity >= 70:
-            weather_score -= 2
-            reasons.append(f"相对湿度 {humidity:g}% 偏高，空气中花粉倾向轻微下调")
+        temp_points = 0.0
+        if temp is not None:
+            # A trapezoid encodes a broad, uncertain favorable range without
+            # an artificial six-point jump at exactly 5°C or 22°C.
+            if 5 < temp < 10: temp_points = 6 * (temp - 5) / 5
+            elif 10 <= temp <= 18: temp_points = 6
+            elif 18 < temp < 22: temp_points = 6 * (22 - temp) / 4
+            weather_score += temp_points
+            if temp_points > 0:
+                reasons.append(f"气温 {temp:g}°C 的温度辅助约 +{temp_points:.1f} 分（平滑弱权重，非花粉测量）")
+        humidity_points = 0.0
+        if humidity is not None:
+            # Drying gradually adds at most +2; humid-air deposition gradually
+            # subtracts at most -2. These deliberately remain weak modifiers.
+            if humidity < 30: humidity_points = 2
+            elif humidity < 50: humidity_points = 2 * (50 - humidity) / 20
+            elif 60 < humidity < 80: humidity_points = -2 * (humidity - 60) / 20
+            elif humidity >= 80: humidity_points = -2
+            weather_score += humidity_points
+            if humidity_points > 0:
+                reasons.append(f"相对湿度 {humidity:g}% 偏干，辅助约 +{humidity_points:.1f} 分")
+            elif humidity_points < 0:
+                reasons.append(f"相对湿度 {humidity:g}% 偏湿，辅助约 {humidity_points:.1f} 分")
         # Open-Meteo's current precipitation is a backward-looking sum whose
         # duration is returned as `current.interval` (often 15 minutes). Use
         # a normalized intensity proxy so different accumulation windows are
@@ -407,18 +421,22 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
                      if rain is not None and rain_interval_s is not None else None)
         if rain_rate is not None and not math.isfinite(rain_rate):
             rain_rate = None
-        if rain_rate is not None and rain_rate >= 3:
-            weather_score -= 10
-            reasons.append(f"近 {rain_interval_s / 60:g} 分钟降水 {rain:g} mm（折算雨强 {rain_rate:g} mm/h），短时花粉倾向明显下调（弱天气信号）")
-        elif rain_rate is not None and rain_rate >= 1:
-            weather_score -= 6
-            reasons.append(f"近 {rain_interval_s / 60:g} 分钟降水 {rain:g} mm（折算雨强 {rain_rate:g} mm/h），短时花粉倾向中度下调（弱天气信号）")
-        elif rain_rate is not None and rain_rate >= 0.2:
-            weather_score -= 2
-            reasons.append(f"近 {rain_interval_s / 60:g} 分钟有少量降水（折算雨强 {rain_rate:g} mm/h），只作轻微下调")
-        elif rain_rate is not None and cloud is not None and cloud < 35:
-            weather_score += 5
-            reasons.append("当前少云/晴朗，轻微上调释放与扩散可能性")
+        rain_penalty = 0.0
+        if rain_rate is not None:
+            if rain_rate <= 0.2: rain_penalty = 0
+            elif rain_rate < 1: rain_penalty = -2 * (rain_rate - 0.2) / 0.8
+            elif rain_rate < 3: rain_penalty = -2 - 4 * (rain_rate - 1) / 2
+            elif rain_rate < 8: rain_penalty = -6 - 4 * (rain_rate - 3) / 5
+            else: rain_penalty = -10
+            weather_score += rain_penalty
+            if rain_penalty < 0:
+                reasons.append(f"近 {rain_interval_s / 60:g} 分钟降水 {rain:g} mm（折算雨强 {rain_rate:g} mm/h），连续雨强辅助约 {rain_penalty:.1f} 分")
+        cloud_points = 0.0
+        if rain_rate is not None and rain_rate < 0.2 and cloud is not None and cloud < 35:
+            cloud_points = 5 * max(0.0, min(1.0, (35 - cloud) / 25))
+            weather_score += cloud_points
+            if cloud_points > 0:
+                reasons.append(f"当前云量 {cloud:g}% 较少，晴朗辅助约 +{cloud_points:.1f} 分")
         # Rain/sunshine effects are bounded and never replace direct pollen evidence.
         forecast = weather.get("daily", {})
         forecast = forecast if isinstance(forecast, dict) else {}
@@ -433,14 +451,11 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             except (ValueError, AttributeError): today_index = 0
             today_index = min(today_index, len(sunny) - 1, len(rain_sum) - 1)
             today_sun_s = _bounded_weather_number(sunny[today_index], 0, 86_400)
-            today_rain = _bounded_weather_number(rain_sum[today_index], 0, 10_000)
             today_sun = today_sun_s / 3600 if today_sun_s is not None else None
-            if today_rain is not None and today_rain > 1: weather_score -= 4
-            elif today_rain is not None and today_rain < 1 and today_sun is not None and today_sun >= 8: weather_score += 4
             yesterday = today_index - 1
             yesterday_rain = _bounded_weather_number(rain_sum[yesterday], 0, 10_000) if yesterday >= 0 else None
-            if (yesterday_rain is not None and yesterday_rain > 1 and today_rain is not None and today_rain < 1
-                    and today_sun is not None and today_sun >= 6 and temp is not None and 5 <= temp <= 22):
+            if (yesterday_rain is not None and yesterday_rain > 1 and rain_rate is not None and rain_rate < 0.2
+                    and today_sun is not None and today_sun >= 6 and temp_points > 0):
                 weather_score += 3
                 reasons.append("前一日降雨后转为温暖晴朗，释放/扩散可能性仅作轻微上调")
         score += max(-12, min(12, weather_score))

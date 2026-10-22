@@ -262,6 +262,29 @@ class SmartControlTests(unittest.TestCase):
         self.assertTrue(result["preboost_active"])
         self.assertEqual(result["forecast_tier_6h"], "extreme")
 
+    def test_evening_boost_includes_exact_start_and_excludes_exact_end(self):
+        config = smart.normalize_config({"evening_start": "17:10", "evening_minutes": 40})
+        expected = [("17:09", False, 0), ("17:10", True, 35),
+                    ("17:49", True, 35), ("17:50", False, 0)]
+        for clock, active, score in expected:
+            with self.subTest(clock=clock):
+                now = datetime.fromisoformat(f"2026-04-01T{clock}:00+08:00")
+                risk = smart.assess(config, None, now)
+                self.assertEqual(risk["evening_boost"], active)
+                self.assertEqual(risk["score"], score)
+                if active:
+                    self.assertEqual(smart.desired_tier(risk), "normal")
+                    self.assertEqual(smart.target_mode("low", smart.desired_tier(risk), "normal"), "medium")
+
+    def test_peak_preboost_window_includes_exact_boundary_only(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({"official_level": 1, "preboost_minutes": 45,
+                                         "official_updated_at": int(now.timestamp() * 1000)})
+        config["official_peak_at"] = (now + smart.timedelta(minutes=45)).isoformat()
+        self.assertTrue(smart.assess(config, None, now)["preboost_active"])
+        config["official_peak_at"] = (now + smart.timedelta(minutes=46)).isoformat()
+        self.assertFalse(smart.assess(config, None, now)["preboost_active"])
+
     def test_indoor_residual_tail_holds_normal_target_for_configured_duration(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
         config = smart.normalize_config({"residual_hours": 18})

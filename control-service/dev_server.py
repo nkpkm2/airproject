@@ -426,16 +426,20 @@ def fetch_smart_weather(config: dict) -> dict:
     daily = body.get("daily", {})
     if not isinstance(current, dict) or not isinstance(hourly, dict) or not isinstance(daily, dict):
         raise ValueError("天气服务返回的数据格式不正确")
+    # `past_days=4` prepends historical samples to the hourly arrays. Keep a
+    # bounded tail rather than the first 72 entries, otherwise the six-hour
+    # outlook can contain only past observations and silently never pre-ramp.
+    # The fixed 4-day-past/4-day-forecast request is normally ~192 samples.
     return {
         "latitude": float(config["latitude"]),
         "longitude": float(config["longitude"]),
         "current": current,
-        "hourly": {"time": hourly.get("time", [])[:72],
-                   "temperature_2m": hourly.get("temperature_2m", [])[:72],
-                   "relative_humidity_2m": hourly.get("relative_humidity_2m", [])[:72],
-                   "precipitation_probability": hourly.get("precipitation_probability", [])[:72],
-                   "cloud_cover": hourly.get("cloud_cover", [])[:72],
-                   "wind_speed_10m": hourly.get("wind_speed_10m", [])[:72]},
+        "hourly": {"time": hourly.get("time", [])[-256:],
+                   "temperature_2m": hourly.get("temperature_2m", [])[-256:],
+                   "relative_humidity_2m": hourly.get("relative_humidity_2m", [])[-256:],
+                   "precipitation_probability": hourly.get("precipitation_probability", [])[-256:],
+                   "cloud_cover": hourly.get("cloud_cover", [])[-256:],
+                   "wind_speed_10m": hourly.get("wind_speed_10m", [])[-256:]},
         "daily": {"time": daily.get("time", [])[:9],
                   "precipitation_sum_mm": daily.get("precipitation_sum", [])[:9],
                   "sunshine_duration_s": daily.get("sunshine_duration", [])[:9]},

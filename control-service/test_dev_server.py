@@ -1,8 +1,11 @@
 import importlib.util
+import json
 import unittest
 from collections import deque
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 
 MODULE_PATH = Path(__file__).with_name("dev_server.py")
@@ -13,6 +16,42 @@ SPEC.loader.exec_module(server)
 
 
 class DevServerStateTests(unittest.TestCase):
+    def test_smart_weather_retains_recent_tail_including_future_hours(self):
+        now = datetime(2026, 4, 1, 14, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+        start = datetime(2026, 3, 28, 0, 0)
+        times = [(start + timedelta(hours=index)).isoformat(timespec="minutes")
+                 for index in range(192)]
+        body = {
+            "timezone": "Asia/Shanghai",
+            "current": {"temperature_2m": 15, "relative_humidity_2m": 30,
+                         "precipitation": 0, "interval": 900, "cloud_cover": 10},
+            "hourly": {"time": times, "temperature_2m": [15] * len(times),
+                       "relative_humidity_2m": [30] * len(times),
+                       "precipitation_probability": [0] * len(times),
+                       "cloud_cover": [10] * len(times)},
+            "daily": {"time": ["2026-04-01"], "precipitation_sum": [0],
+                      "sunshine_duration": [36000]},
+        }
+        response = Mock()
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        response.read.return_value = json.dumps(body).encode()
+        config = server.smart_control.normalize_config({
+            "latitude": 39.9, "longitude": 116.4, "timezone": "Asia/Shanghai",
+            "official_level": 2, "official_updated_at": int(now.timestamp() * 1000),
+        })
+        with patch.object(server.urllib.request, "urlopen", return_value=response), \
+             patch.object(server.time, "time", return_value=now.timestamp()):
+            weather = server.fetch_smart_weather(config)
+
+        # With 4 past days, next-six-hour timestamps are well beyond index 72.
+        self.assertEqual(len(weather["hourly"]["time"]), 192)
+        self.assertIn("2026-04-01T20:00", weather["hourly"]["time"])
+        self.assertEqual(weather["current"]["interval"], 900)
+        risk = server.smart_control.assess(config, weather, now)
+        self.assertEqual(risk["forecast_hours_used"], 6)
+        self.assertGreater(risk["forecast_score_6h"], risk["score"])
+
     def test_telemetry_rate_and_sequence_gap(self):
         record = {}
         for sequence in range(600):

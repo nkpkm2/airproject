@@ -104,8 +104,10 @@ class SmartControlTests(unittest.TestCase):
 
     def test_official_pollen_page_parser_requires_fresh_cupressaceae_evidence(self):
         now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
-        page = "<html><p>发布时间：2026年4月1日</p><p>柏科花粉浓度极高，侧柏进入散粉高峰</p></html>"
-        self.assertEqual(smart.parse_official_pollen_page(page, now)["level"], 4)
+        page = "<html><p>发布时间：2026年4月1日</p><p>柏科花粉浓度极高，侧柏进入散粉高峰</p><p>4月5日至8日柏科花粉预计进入高峰</p></html>"
+        parsed = smart.parse_official_pollen_page(page, now)
+        self.assertEqual(parsed["level"], 4)
+        self.assertEqual(parsed["predicted_peak_at"], "2026-04-05T10:00:00+08:00")
         stale = page.replace("2026年4月1日", "2026年3月20日")
         with self.assertRaisesRegex(ValueError, "最近 7 天"):
             smart.parse_official_pollen_page(stale, now)
@@ -176,6 +178,16 @@ class SmartControlTests(unittest.TestCase):
         result = smart.assess(config, None, now, official_signal=stale)
         self.assertEqual(result["sources"]["official_pollen"], "operator_entry")
         self.assertEqual(result["tier"], "weak")
+
+    def test_fresh_government_peak_date_can_trigger_preboost_without_manual_peak_entry(self):
+        now = datetime(2026, 4, 1, 12, tzinfo=ZoneInfo("Asia/Shanghai"))
+        config = smart.normalize_config({"preboost_minutes": 45})
+        signal = {"level": 3, "published_at_ms": int(now.timestamp() * 1000),
+                  "fetched_at_ms": int(now.timestamp() * 1000),
+                  "predicted_peak_at": (now + smart.timedelta(minutes=30)).isoformat()}
+        result = smart.assess(config, None, now, official_signal=signal)
+        self.assertTrue(result["preboost_active"])
+        self.assertEqual(result["forecast_tier_6h"], "extreme")
 
     def test_enable_requires_location(self):
         with self.assertRaisesRegex(ValueError, "坐标"):

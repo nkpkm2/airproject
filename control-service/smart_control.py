@@ -6,7 +6,7 @@ available global pollen API does not cover this pollen family in China.
 """
 from __future__ import annotations
 
-from datetime import datetime, time as daytime, timedelta, timezone
+from datetime import date, datetime, time as daytime, timedelta, timezone
 import math
 import re
 from html import unescape
@@ -264,7 +264,8 @@ def assess(config: dict[str, Any], weather: dict[str, Any] | None, now: datetime
             if (rain_probability or 0) >= 60: delta -= 2
         forecast_score = max(0, min(100, score + max(-6, min(6, delta))))
     preboost = False
-    peak_at = config.get("official_peak_at")
+    peak_at = ((official_signal.get("predicted_peak_at") if official_signal else None)
+               if official_source == "verified_gov_cn_page" else None) or config.get("official_peak_at")
     if peak_at:
         try:
             forecast_peak = datetime.fromisoformat(peak_at)
@@ -323,7 +324,37 @@ def parse_official_pollen_page(page: str, now: datetime | None = None) -> dict[s
     elif re.search(r"中等|中度|\b2\s*级\b|适中", context): level = 2
     elif re.search(r"低浓度|较低|偏低|\b1\s*级\b|低风险", context): level = 1
     else: raise ValueError("公告提到柏科但没有可判读的浓度级别/高峰信息")
+    peak_at = None
+    date_pattern = re.compile(
+        r"(?:(20\d{2})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]"
+        r"(?:\s*(?:至|到|[-~～])\s*(?:(20\d{2})\s*年\s*)?(?:(\d{1,2})\s*月\s*)?(\d{1,2})\s*[日号])?"
+    )
+    for peak_match in re.finditer(r"高峰(?:日|期)?|达峰|峰值", text):
+        window_start = max(0, peak_match.start() - 180)
+        window = text[window_start:min(len(text), peak_match.end() + 100)]
+        if not pollen_terms.search(window): continue
+        date_matches = list(date_pattern.finditer(window))
+        # Ignore the article's own publication date and prefer the explicit
+        # forecast date nearest the peak wording.
+        date_matches.sort(key=lambda item: abs(window_start + item.start() - peak_match.start()))
+        for date_match in date_matches:
+            first_year, first_month, first_day, second_year, second_month, second_day = date_match.groups()
+            try:
+                year = int(first_year or published.year)
+                month = int(first_month)
+                day = int(first_day)
+                forecast_day = date(year, month, day)
+                if forecast_day < published.date(): continue
+                # A date range such as “3月17日至21日” omits the second month/year.
+                if second_day:
+                    date(int(second_year or year), int(second_month or month), int(second_day))
+                peak_at = datetime(year, month, day, 10, 0, tzinfo=published.tzinfo).isoformat()
+                break
+            except (TypeError, ValueError):
+                continue
+        if peak_at: break
     return {"level": level, "published_at_ms": int(published.timestamp() * 1000),
+            "predicted_peak_at": peak_at, "peak_time_precision": "date_window_start_10_local" if peak_at else None,
             "evidence": context[:600], "age_days": round(age_days, 2)}
 
 

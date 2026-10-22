@@ -42,10 +42,11 @@ function renderSmart(snapshot,populate=false){
   const weatherFetchedAt=Number(snapshot.weather?.fetched_at_ms||0),weatherAgeMs=Date.now()-weatherFetchedAt,weatherFresh=weatherFetchedAt>0&&weatherAgeMs>=-300000&&weatherAgeMs<=3600000;
   $('smart-refresh').textContent=weatherFetchedAt&&!weatherFresh?`天气数据已过期，已忽略 · ${new Date(weatherFetchedAt).toLocaleTimeString()}`:weatherFresh?`天气(Open-Meteo) ${new Date(weatherFetchedAt).toLocaleTimeString()}`:snapshot.weather_error?'天气读取失败':'等待天气数据';
   const pollen=snapshot.official_pollen, pollenLabels={1:'弱',2:'正常',3:'高',4:'极高'};
-  const pollenAgeHours=pollen?(Date.now()-Number(pollen.published_at_ms))/3600000:Infinity;
+  const pollenSource=risk.sources?.official_pollen;
+  const pollenStatus=pollenSource==='verified_gov_cn_page'?'自动读取并参与当前评分':pollenSource==='verified_gov_cn_page_forecast'?'自动读取；未来峰值预报有效，尚未按当前浓度计分':'已读取但未参与评分';
   const peakStart=pollen?.predicted_peak_at?new Date(pollen.predicted_peak_at):null,peakEnd=pollen?.predicted_peak_until?new Date(pollen.predicted_peak_until):null;
   const peakWindow=peakStart?`${peakStart.toLocaleDateString()}${peakEnd&&peakEnd.toDateString()!==peakStart.toDateString()?` 至 ${peakEnd.toLocaleDateString()}`:''}`:'';
-  $('official-pollen-status').textContent=pollen?`${pollenAgeHours>=0&&pollenAgeHours<=48?'自动读取并参与评分':'已读取但公告过旧/日期异常，未参与评分'}：${pollenLabels[pollen.level]||'未判定'} · 公告日期 ${new Date(pollen.published_at_ms).toLocaleString()} · ${peakWindow?`预测高峰 ${peakWindow} · `:''}最近抓取 ${new Date(pollen.fetched_at_ms).toLocaleTimeString()} · ${pollen.evidence||''}`:snapshot.official_pollen_error?`自动读取未采纳：${snapshot.official_pollen_error}`:config.official_url?'已配置来源，等待读取并校验公告':'官方预报尚未配置';
+  $('official-pollen-status').textContent=pollen?`${pollenStatus}：${pollenLabels[pollen.level]||'未判定'} · 公告日期 ${new Date(pollen.published_at_ms).toLocaleString()} · ${peakWindow?`预测高峰 ${peakWindow} · `:''}最近抓取 ${new Date(pollen.fetched_at_ms).toLocaleTimeString()} · ${pollen.evidence||''}`:snapshot.official_pollen_error?`自动读取未采纳：${snapshot.official_pollen_error}`:config.official_url?'已配置来源，等待读取并校验公告':'官方预报尚未配置';
   const socialAgeHours=config.social_updated_at==null?Infinity:(Date.now()-Number(config.social_updated_at))/3600000;
   $('social-signal-status').textContent=Number(config.social_level)>0?(socialAgeHours>=0&&socialAgeHours<=12?`人工核验信号有效 · ${new Date(Number(config.social_updated_at)).toLocaleString()}更新 · 最多保留12小时`:`社交信号已过期或时间戳无效，不参与评分`):'社交/过敏趋势未提供；不读取个人笔记或用户身份';
   const capacity=snapshot.capacity||{},selected=snapshot.selected_capacity||{},ach=capacity.nominal_air_changes_per_hour||{},flow=capacity.total_airflow_m3h||{};
